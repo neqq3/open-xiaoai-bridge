@@ -327,6 +327,29 @@ APP_CONFIG = {
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
         "extra_body": {},
+        # 可选语音交互策略。默认关闭以保持普通 OpenAI-compatible 后端
+        # 的原有请求和整段 TTS 行为；启用后默认进入 standard 模式。
+        "voice": {
+            "enabled": False,
+            "default_mode": "standard",  # fast / standard / deep
+            # 可选覆盖 fast / standard / deep 的内置提示词。
+            "mode_prompts": {},
+            # Hermes Agent 专用增强。不要为未知的 OpenAI-compatible
+            # 服务开启；SSE 不可用时会在尚未播出答案的前提下安全回退。
+            "hermes": {
+                "enabled": False,
+                "streaming": True,
+                # 完整句形成后才进入顺序播放队列，避免乱序和 TTS 重叠。
+                "sentence_min_chars": 16,
+                "sentence_max_chars": 160,
+                "progress": {
+                    "enabled": True,
+                    "initial_delay": 8,
+                    "min_interval": 20,
+                    "max_messages": 2,
+                },
+            },
+        },
     },
     # QwenPaw Configuration
     # 需先启动 QwenPaw: qwenpaw app

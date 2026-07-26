@@ -5,8 +5,11 @@ including Hermes Agent API server mode.
 """
 
 import asyncio
+import codecs
+import inspect
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -16,6 +19,10 @@ import open_xiaoai_server
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
+
+
+class OpenAIStreamError(RuntimeError):
+    """Streaming request failed or returned an unsupported response."""
 
 
 class OpenAIManager:
@@ -289,6 +296,160 @@ class OpenAIManager:
         if response_text:
             cls._append_history(history, text, response_text)
         return response_text
+
+    @classmethod
+    async def request_streaming_chat_completion(
+        cls,
+        text: str,
+        *,
+        on_delta: Callable[[str], Awaitable[None] | None],
+        on_tool_progress: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    ) -> str | None:
+        """Request a real OpenAI-compatible SSE stream.
+
+        Standard ``delta.content`` chunks are forwarded to ``on_delta``.
+        Hermes' optional ``hermes.tool.progress`` events are forwarded as
+        structured dictionaries. Tool arguments, previews and raw payloads
+        remain inside this transport layer and are never spoken here.
+        """
+        if not cls._initialized:
+            cls.initialize_from_config()
+        if not cls._enabled:
+            logger.warning("[OpenAI] streaming request called but backend is disabled")
+            return None
+
+        session_key = cls._session_key
+        history = cls._sessions.setdefault(session_key, [])
+        messages = cls._build_messages(history, text)
+        payload: dict[str, Any] = {
+            "model": cls._model,
+            "messages": messages,
+            "stream": True,
+            **cls._extra_body,
+        }
+        if cls._temperature is not None:
+            payload["temperature"] = cls._temperature
+        if cls._max_tokens is not None:
+            payload["max_tokens"] = cls._max_tokens
+
+        from core.openai_voice import (
+            SSEDecoder,
+            extract_openai_delta,
+        )
+
+        started_at = time.monotonic()
+        text_parts: list[str] = []
+        finish_reason: str | None = None
+        decoder = SSEDecoder()
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")()
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=cls._timeout)
+        ) as session:
+            async with session.post(
+                cls._chat_completions_url(),
+                json=payload,
+                headers=cls._headers(),
+            ) as response:
+                if response.status >= 400:
+                    error_text = await response.text()
+                    raise OpenAIStreamError(
+                        f"HTTP {response.status}: {error_text[:500]}"
+                    )
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/event-stream" not in content_type:
+                    raise OpenAIStreamError(
+                        f"Streaming unsupported: Content-Type={content_type!r}"
+                    )
+
+                async for raw_chunk in response.content.iter_any():
+                    decoded = utf8_decoder.decode(raw_chunk)
+                    for event in decoder.feed(decoded):
+                        if event.event == "hermes.tool.progress":
+                            if on_tool_progress:
+                                try:
+                                    tool_event = cls._decode_tool_progress(event.data)
+                                    if tool_event:
+                                        await cls._invoke_callback(
+                                            on_tool_progress,
+                                            tool_event,
+                                        )
+                                except Exception as exc:
+                                    logger.debug(
+                                        f"[OpenAI] Ignoring malformed Hermes tool event: {exc}"
+                                    )
+                            continue
+                        if event.data == "[DONE]":
+                            continue
+                        try:
+                            delta, event_finish_reason = extract_openai_delta(
+                                event.data
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                f"[OpenAI] Ignoring malformed SSE data event: {exc}"
+                            )
+                            continue
+                        if event_finish_reason:
+                            finish_reason = str(event_finish_reason)
+                        if delta:
+                            text_parts.append(delta)
+                            await cls._invoke_callback(on_delta, delta)
+
+                tail = utf8_decoder.decode(b"", final=True)
+                for event in decoder.feed(tail, final=True):
+                    if event.event == "hermes.tool.progress":
+                        if on_tool_progress:
+                            tool_event = cls._decode_tool_progress(event.data)
+                            if tool_event:
+                                await cls._invoke_callback(
+                                    on_tool_progress,
+                                    tool_event,
+                                )
+                        continue
+                    if event.data == "[DONE]":
+                        continue
+                    delta, event_finish_reason = extract_openai_delta(event.data)
+                    if event_finish_reason:
+                        finish_reason = str(event_finish_reason)
+                    if delta:
+                        text_parts.append(delta)
+                        await cls._invoke_callback(on_delta, delta)
+
+        if finish_reason == "error":
+            raise OpenAIStreamError("Server ended the stream with finish_reason=error")
+
+        response_text = "".join(text_parts).strip()
+        if not response_text:
+            raise OpenAIStreamError("Streaming response contained no final text")
+
+        cls._append_history(history, text, response_text)
+        logger.ai_response(response_text, module=f"OpenAI({session_key})")
+        logger.info(
+            f"[OpenAI] Streaming final response completed: "
+            f"chars={len(response_text)}, "
+            f"elapsed={time.monotonic() - started_at:.1f}s"
+        )
+        return response_text
+
+    @staticmethod
+    async def _invoke_callback(callback, value):
+        result = callback(value)
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    def _decode_tool_progress(data: str) -> dict[str, Any] | None:
+        import json
+
+        body = json.loads(data)
+        if not isinstance(body, dict):
+            return None
+        return {
+            "tool": body.get("tool"),
+            "status": body.get("status"),
+            "tool_call_id": body.get("toolCallId"),
+        }
 
     @classmethod
     def _headers(cls) -> dict[str, str]:

@@ -364,6 +364,23 @@ curl -X POST http://localhost:9092/api/interrupt
     "max_tokens": 512,
     "history_max_messages": 20,
     "tts_speaker": "xiaoai",
+    "voice": {
+        "enabled": False,             # 启用可切换语音策略
+        "default_mode": "standard",  # fast / standard / deep
+        "mode_prompts": {},           # 可选：覆盖三种模式的内置提示词
+        "hermes": {
+            "enabled": False,         # 仅连接 Hermes Agent 时开启
+            "streaming": True,
+            "sentence_min_chars": 16,
+            "sentence_max_chars": 160,
+            "progress": {
+                "enabled": True,
+                "initial_delay": 8,
+                "min_interval": 20,
+                "max_messages": 2,
+            },
+        },
+    },
 }
 ```
 
@@ -390,6 +407,10 @@ if "让小黑" in text:
 ```
 
 `base_url` 可以直接填到 `/v1`，框架会自动调用 `/chat/completions`；如果你的服务已经给出完整 `/v1/chat/completions` 地址，也可以直接填写完整地址。连续对话会按 `session_key` 保存最近 `history_max_messages` 条上下文；需要隔离多个助手时，可在唤醒前调用 `app.set_openai_session_key("assistant-name")`。
+
+启用 `voice.enabled` 后，当前会话可用“切换快速模式”“切换深度模式”“恢复标准模式”持久切换策略。“简单说……”和“详细查一下……”只覆盖当前一问。快速模式优先短答并减少等价查询，标准模式平衡速度和完整性，深度模式允许更充分的检索与较长回答。
+
+`voice.hermes.enabled` 是 Hermes Agent 专用增强：解析标准 OpenAI SSE 文字增量和 Hermes 的结构化工具生命周期事件；等待较久时只播报经过归类、合并和限流的自然语言状态，不会朗读工具参数、网址、日志或模型推理。最终文字按完整句进入同一个顺序 TTS 队列。若服务不支持流式且尚未播出最终答案，会自动回退到原有非流式路径；普通 OpenAI-compatible 服务应保持该开关关闭。
 
 ## 🐾 QwenPaw 集成
 
