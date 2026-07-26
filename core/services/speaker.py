@@ -18,6 +18,8 @@ class CommandResult:
 
 class SpeakerManager:
     status: Literal["playing", "paused", "idle"] = "idle"
+    _NATIVE_TTS_SCRIPT_MARKER = "tts_play.sh]"
+    _NATIVE_TTS_COMPLETION_MARKER = "Audio playback completed successfully"
 
     def __init__(self):
         set_speaker(self)
@@ -69,13 +71,32 @@ class SpeakerManager:
             return get_xiaoai().on_output_data(buffer)
 
         if blocking:
-            command = (
-                f"miplayer -f '{url}'"
-                if url
-                else f"/usr/sbin/tts_play.sh '{text.replace("'", "'\\''") or '你好'}'"
-            )
+            if url:
+                command = f"miplayer -f '{url}'"
+            else:
+                escaped_text = (text or "你好").replace("'", "'\\''")
+                command = f"/usr/sbin/tts_play.sh '{escaped_text}'"
             res = await self.run_shell(command, timeout=timeout)
-            return res.exit_code == 0
+            if res.exit_code != 0:
+                logger.warning(
+                    f"[Speaker] Blocking playback failed with exit code {res.exit_code}"
+                )
+                return False
+
+            # OH2P/LX06 的 tts_play.sh 在收到 TERM 后仍可能通过 EXIT trap
+            # 以 0 退出。只有看到脚本自己的播放完成标记，才能确认 miplayer
+            # 真正走到了 EndReached；旧版无日志脚本继续兼容退出码语义。
+            if (
+                not url
+                and self._NATIVE_TTS_SCRIPT_MARKER in res.stdout
+                and self._NATIVE_TTS_COMPLETION_MARKER not in res.stdout
+            ):
+                logger.warning(
+                    "[Speaker] Native TTS exited without playback completion marker"
+                )
+                return False
+
+            return True
 
         if url:
             data = json_encode({"url": url, "type": 1})

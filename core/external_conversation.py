@@ -17,6 +17,7 @@ Key design decisions:
 
 import asyncio
 import os
+import time
 
 import open_xiaoai_server
 
@@ -543,22 +544,35 @@ class ExternalConversationController:
     # ---- TTS ----
 
     async def _play_tts(self, text: str):
-        """Play text via Doubao TTS (blocks until playback finishes)."""
+        """Play backend-selected TTS and wait until playback finishes."""
+        started_at = time.monotonic()
         self._playback_token = open_xiaoai_server.begin_playback_session()
         try:
-            await self.backend._play_response_with_tts(
+            played = await self.backend._play_response_with_tts(
                 text,
                 tts_speaker=self.backend.get_tts_speaker_for_session_key(),
                 playback_token=self._playback_token,
             )
+            if played is False:
+                raise RuntimeError("backend TTS returned without completing playback")
+            logger.info(
+                f"TTS playback completed: chars={len(text)}, "
+                f"elapsed={time.monotonic() - started_at:.1f}s",
+                module=self.LOG_MODULE,
+            )
         except Exception as exc:
             logger.error(
-                f"TTS playback error: {exc}",
+                f"TTS playback error after {time.monotonic() - started_at:.1f}s: {exc}",
                 module=self.LOG_MODULE,
             )
             speaker = get_speaker()
             if speaker:
-                await speaker.play(text=text)
+                fallback_played = await speaker.play(text=text, blocking=True)
+                if not fallback_played:
+                    logger.error(
+                        "Fallback native TTS did not complete",
+                        module=self.LOG_MODULE,
+                    )
         finally:
             self._playback_token = None
 

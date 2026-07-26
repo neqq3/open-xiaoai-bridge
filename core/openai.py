@@ -5,6 +5,7 @@ including Hermes Agent API server mode.
 """
 
 import asyncio
+import time
 import uuid
 from typing import Any
 
@@ -232,14 +233,22 @@ class OpenAIManager:
 
     @classmethod
     async def _run_chat_completion(cls, run_id: str, text: str):
+        started_at = time.monotonic()
         try:
             response_text = await cls._request_chat_completion(text)
             if response_text:
                 cls._response_texts[run_id] = response_text
                 logger.ai_response(response_text, module=f"OpenAI({cls._session_key})")
+                logger.info(
+                    f"[OpenAI] Final response received: chars={len(response_text)}, "
+                    f"elapsed={time.monotonic() - started_at:.1f}s"
+                )
         except Exception as exc:
             cls.last_error = f"{type(exc).__name__}: {exc}"
-            logger.error(f"[OpenAI] Chat completion failed: {cls.last_error}")
+            logger.error(
+                f"[OpenAI] Chat completion failed after "
+                f"{time.monotonic() - started_at:.1f}s: {cls.last_error}"
+            )
         finally:
             waiter = cls._response_events.get(run_id)
             if waiter and not waiter.done():
@@ -367,7 +376,7 @@ class OpenAIManager:
         text: str,
         tts_speaker: str | None = None,
         playback_token: int | None = None,
-    ):
+    ) -> bool:
         """Synthesize text and play it through the speaker."""
         try:
             from core.ref import get_speaker
@@ -375,9 +384,25 @@ class OpenAIManager:
             resolved_tts_speaker = tts_speaker or cls.get_tts_speaker_for_session_key()
             if resolved_tts_speaker == cls.XIAOAI_TTS_SPEAKER:
                 speaker = get_speaker()
-                if speaker:
-                    await speaker.play(text=text, blocking=True)
-                return
+                if not speaker:
+                    logger.error("[OpenAI] Speaker not available for native TTS")
+                    return False
+
+                for attempt in range(1, 3):
+                    played = await speaker.play(text=text, blocking=True)
+                    if played:
+                        if attempt > 1:
+                            logger.info(
+                                "[OpenAI] Native TTS retry completed successfully"
+                            )
+                        return True
+
+                    logger.warning(
+                        f"[OpenAI] Native TTS did not complete (attempt {attempt}/2)"
+                    )
+                    if attempt == 1:
+                        await asyncio.sleep(0.5)
+                return False
 
             from core.services.tts.doubao import DoubaoTTS
 
@@ -390,8 +415,8 @@ class OpenAIManager:
                 )
                 speaker = get_speaker()
                 if speaker:
-                    await speaker.play(text=text, blocking=True)
-                return
+                    return await speaker.play(text=text, blocking=True)
+                return False
 
             speaker_id = resolved_tts_speaker or tts_config.get(
                 "default_speaker", "zh_female_xiaohe_uranus_bigtts"
@@ -426,6 +451,7 @@ class OpenAIManager:
                     sample_rate=24000,
                     playback_token=playback_token,
                 )
+            return True
         except Exception as exc:
             logger.error(f"[OpenAI] Error playing response with TTS: {exc}")
             try:
@@ -433,6 +459,7 @@ class OpenAIManager:
 
                 speaker = get_speaker()
                 if speaker:
-                    await speaker.play(text=text, blocking=True)
+                    return await speaker.play(text=text, blocking=True)
             except Exception as fallback_error:
                 logger.error(f"[OpenAI] Fallback TTS also failed: {fallback_error}")
+            return False
