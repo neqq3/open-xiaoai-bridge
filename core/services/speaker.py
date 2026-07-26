@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import Literal
 
 import open_xiaoai_server
@@ -20,6 +21,14 @@ class SpeakerManager:
     status: Literal["playing", "paused", "idle"] = "idle"
     _NATIVE_TTS_SCRIPT_MARKER = "tts_play.sh]"
     _NATIVE_TTS_COMPLETION_MARKER = "Audio playback completed successfully"
+    _NATIVE_TTS_MAX_CHARS = 180
+    _TTS_DIAGNOSTIC_LIMIT = 1200
+    _TTS_TEXT_LOG_MARKERS = (
+        "Script started with arguments:",
+        "Text to speech:",
+        "Final parameters - Text:",
+        " - Text:",
+    )
 
     def __init__(self):
         set_speaker(self)
@@ -72,29 +81,52 @@ class SpeakerManager:
 
         if blocking:
             if url:
-                command = f"miplayer -f '{url}'"
+                commands = [(f"miplayer -f '{url}'", False)]
             else:
-                escaped_text = (text or "你好").replace("'", "'\\''")
-                command = f"/usr/sbin/tts_play.sh '{escaped_text}'"
-            res = await self.run_shell(command, timeout=timeout)
-            if res.exit_code != 0:
-                logger.warning(
-                    f"[Speaker] Blocking playback failed with exit code {res.exit_code}"
-                )
-                return False
+                native_text = self._normalize_native_tts_text(text or "你好")
+                chunks = self._split_native_tts_text(native_text)
+                if len(chunks) > 1:
+                    logger.info(
+                        f"[Speaker] Native TTS split into {len(chunks)} chunks"
+                    )
+                commands = []
+                for chunk in chunks:
+                    escaped_text = chunk.replace("'", "'\\''")
+                    commands.append(
+                        (f"/usr/sbin/tts_play.sh '{escaped_text}'", True)
+                    )
 
-            # OH2P/LX06 的 tts_play.sh 在收到 TERM 后仍可能通过 EXIT trap
-            # 以 0 退出。只有看到脚本自己的播放完成标记，才能确认 miplayer
-            # 真正走到了 EndReached；旧版无日志脚本继续兼容退出码语义。
-            if (
-                not url
-                and self._NATIVE_TTS_SCRIPT_MARKER in res.stdout
-                and self._NATIVE_TTS_COMPLETION_MARKER not in res.stdout
-            ):
-                logger.warning(
-                    "[Speaker] Native TTS exited without playback completion marker"
-                )
-                return False
+            total = len(commands)
+            for index, (command, is_native_tts) in enumerate(commands, start=1):
+                started_at = time.monotonic()
+                res = await self.run_shell(command, timeout=timeout)
+                elapsed = time.monotonic() - started_at
+                part = f"{index}/{total}"
+                if res.exit_code != 0:
+                    logger.warning(
+                        f"[Speaker] Blocking playback failed (part {part}): "
+                        f"exit_code={res.exit_code}, elapsed={elapsed:.1f}s, "
+                        f"stdout={self._diagnostic_output(res.stdout)!r}, "
+                        f"stderr={self._diagnostic_output(res.stderr)!r}"
+                    )
+                    return False
+
+                # OH2P/LX06 的 tts_play.sh 在收到 TERM 后仍可能通过 EXIT trap
+                # 以 0 退出。只有看到脚本自己的播放完成标记，才能确认 miplayer
+                # 真正走到了 EndReached；旧版无日志脚本继续兼容退出码语义。
+                if (
+                    is_native_tts
+                    and self._NATIVE_TTS_SCRIPT_MARKER in res.stdout
+                    and self._NATIVE_TTS_COMPLETION_MARKER not in res.stdout
+                ):
+                    logger.warning(
+                        "[Speaker] Native TTS exited without playback completion "
+                        f"marker (part {part}): exit_code={res.exit_code}, "
+                        f"elapsed={elapsed:.1f}s, "
+                        f"stdout={self._diagnostic_output(res.stdout)!r}, "
+                        f"stderr={self._diagnostic_output(res.stderr)!r}"
+                    )
+                    return False
 
             return True
 
@@ -107,6 +139,65 @@ class SpeakerManager:
 
         res = await self.run_shell(command, timeout=timeout)
         return '"code": 0' in res.stdout if res else False
+
+    @classmethod
+    def _diagnostic_output(cls, output: str | None) -> str:
+        """压缩并截断远端命令输出，避免异常日志无限增长。"""
+        redacted_lines = []
+        for line in (output or "").splitlines():
+            if any(marker in line for marker in cls._TTS_TEXT_LOG_MARKERS):
+                timestamp = line.split(" - ", 1)[0]
+                redacted_lines.append(f"{timestamp} - [TTS text omitted]")
+            else:
+                redacted_lines.append(line)
+        compact = " ".join("\n".join(redacted_lines).split())
+        if len(compact) <= cls._TTS_DIAGNOSTIC_LIMIT:
+            return compact
+        return compact[: cls._TTS_DIAGNOSTIC_LIMIT] + "…"
+
+    @staticmethod
+    def _normalize_native_tts_text(text: str) -> str:
+        """规避原生 tts_play.sh 内部消息拼接无法解析的字符。"""
+        replacements = {
+            '"': "“",
+            "\\": "／",
+            "\r": " ",
+            "\n": " ",
+            "\t": " ",
+        }
+        normalized = "".join(
+            replacements.get(char, char)
+            for char in text
+            if ord(char) >= 32 or char in "\r\n\t"
+        )
+        return " ".join(normalized.split())
+
+    @classmethod
+    def _split_native_tts_text(cls, text: str) -> list[str]:
+        """按自然标点切分，避免原生 TTS 单次生成请求超过30秒。"""
+        remaining = text.strip()
+        chunks: list[str] = []
+        major_punctuation = "。！？!?；;"
+        minor_punctuation = "，,、：: "
+
+        while len(remaining) > cls._NATIVE_TTS_MAX_CHARS:
+            window = remaining[: cls._NATIVE_TTS_MAX_CHARS]
+            cut = max(window.rfind(char) for char in major_punctuation)
+            if cut < cls._NATIVE_TTS_MAX_CHARS // 2:
+                cut = max(window.rfind(char) for char in minor_punctuation)
+            if cut < cls._NATIVE_TTS_MAX_CHARS // 2:
+                cut = cls._NATIVE_TTS_MAX_CHARS
+            else:
+                cut += 1
+
+            chunk = remaining[:cut].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining = remaining[cut:].strip()
+
+        if remaining:
+            chunks.append(remaining)
+        return chunks or ["你好"]
 
     async def play_server_file(
         self,
