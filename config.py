@@ -346,7 +346,7 @@ APP_CONFIG = {
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
         "extra_body": {},
     },
-    # Hermes Agent API Server
+    # Hermes Agent API Server 专用配置
     # 独立于普通 OpenAI-compatible 后端启用和管理。
     "hermes": {
         "base_url": "http://127.0.0.1:8642/v1",
@@ -363,6 +363,19 @@ APP_CONFIG = {
         "max_tokens": 512,
         "history_max_messages": 20,
         "response_timeout": 120,
+        # Hermes 专用流式回复。普通 OpenAI-compatible 后端仍保持非流式。
+        "streaming": {
+            "enabled": True,
+            "sentence_min_chars": 24,
+            "sentence_max_chars": 160,
+        },
+        # 短任务不播报；长任务最多播报两次自然语言进度。
+        "progress": {
+            "enabled": True,
+            "initial_delay": 8,
+            "min_interval": 20,
+            "max_messages": 2,
+        },
         "tts_speed": 1.0,
         "tts_speaker": "xiaoai",
         "session_tts_speakers": {},
