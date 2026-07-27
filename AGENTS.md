@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 小爱音箱与外部 AI 服务（小智 AI、OpenClaw）的桥接器。
+> 小爱音箱与外部 AI 服务（小智 AI、OpenClaw、OpenAI-compatible、Hermes 等）的桥接器。
 > 接管音箱音频输入输出，实现与第三方 AI 的对话。
 
 ## 系统架构
@@ -20,6 +20,13 @@ open-xiaoai-bridge/
 │   ├── xiaozhi.py                 # 小智 AI WebSocket 协议客户端
 │   ├── openclaw.py                # OpenClaw 网关客户端（连接、消息、TTS 播放）
 │   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
+│   ├── openai.py                  # 普通 OpenAI-compatible 非流式后端
+│   ├── hermes.py                  # Hermes 专用 Manager 与流式协议入口
+│   ├── hermes_conversation.py     # Hermes 连续对话与顺序语音控制
+│   ├── hermes_progress.py         # Hermes 工具进度的安全自然语言分类
+│   ├── openai_stream.py           # 协议中立的标准 SSE 文本解析
+│   ├── streaming_conversation.py  # 可复用的流式回复语音交付
+│   ├── speech_queue.py            # 单工作线程顺序语音队列
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
@@ -67,6 +74,8 @@ open-xiaoai-bridge/
 - `send_text(text)` → 发送文本到小智
 - `send_to_openclaw(text, wait_response)` → 发送消息到 OpenClaw（返回 run_id 或回复文本）
 - `send_to_openclaw_and_play_reply(text, wait_response)` → 发送并 TTS 播放回复
+- `send_to_hermes(text, wait_response)` → 发送消息到独立 Hermes 后端
+- `send_to_hermes_and_play_reply(text, wait_response)` → 发送并 TTS 播放 Hermes 回复
 - `schedule(callback)` → 主线程任务队列
 - `shutdown()` → 优雅关闭
 
@@ -158,11 +167,23 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 - TTS 完全阻塞，播放完成后才继续监听
 - 自己持有并管理当前 TTS 的 `playback_token`；停止 OpenClaw 对话时应调用 `stop_tts_playback(token)`，不要在外层直接无 token 全局停止 Rust TTS
 
+### HermesManager / HermesConversationController
+
+Hermes 是独立后端，拥有自己的 `HERMES_ENABLE`、`hermes` 配置、Session 历史和连续对话控制器。普通 `OpenAIManager` 保持上游的非流式 OpenAI-compatible 行为，也不解释 Hermes 专属事件。
+
+- 标准 SSE 文本解析位于 `openai_stream.py`，不包含 Hermes 事件语义
+- `hermes.tool.progress` 只在 `hermes.py` / `hermes_progress.py` 中解释
+- `speech_queue.py` 使用单工作线程保证进度与最终回答不重叠、不乱序
+- 最终文本开始到达后丢弃尚未播放的进度；已经开始播放的进度不被粗暴打断
+- 流式请求在尚未播出最终句段时失败，才允许安全回退到非流式
+- 小爱原生 TTS 使用完整播放标记检查、有限重试和长文本分段
+- 不在 Bridge 侧实现回答模式、模式切换命令或基于模型名/地址的 Hermes 猜测
+
 ### WakeupSessionManager (core/wakeup_session.py)
 
-小智唤醒会话状态机，协调 KWS → VAD → 小智/OpenClaw 的唤醒流程。
+小智唤醒会话状态机，协调 KWS → VAD → 小智及各外部后端的唤醒流程。
 
-- `wakeup(text, source)` → 处理唤醒（调用 `before_wakeup` 钩子，路由到 XiaoZhi 或 OpenClaw）
+- `wakeup(text, source)` → 处理唤醒（调用 `before_wakeup` 钩子并路由）
 - `wait_next_step(timeout)` → 异步等待状态变化（带待决状态缓冲）
 - `update_step(step, step_data)` → 更新步骤
 - 事件回调：`on_interrupt()`, `on_wakeup()`, `on_tts_start()`, `on_tts_end()`, `on_speech()`, `on_silence()`
@@ -171,6 +192,9 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 **路由规则**（`before_wakeup` 返回值）:
 - `"xiaozhi"` → 走小智流程
 - `"openclaw"` → 走 OpenClaw 连续对话
+- `"openai"` → 走普通 OpenAI-compatible 连续对话
+- `"hermes"` → 走 Hermes 专用连续对话
+- `"qwenpaw"` → 走 QwenPaw 连续对话
 - `None` → 不处理（用户自行处理）
 
 **边界约束**:
