@@ -5,7 +5,7 @@ This module manages the main application flow, coordinating between:
 - XiaoZhi (AI conversation service)
 - OpenClaw (External integration)
 - OpenAI (OpenAI-compatible chat service)
-- Hermes (Hermes Agent API server)
+- Hermes（Hermes Agent API 服务）
 - QwenPaw (QwenPaw personal agent workstation)
 - Audio system (VAD, KWS, Codec)
 """
@@ -50,9 +50,9 @@ class MainApp:
         Args:
             enable_xiaozhi: Whether to enable XiaoZhi AI connection (default: True)
             enable_openclaw: Whether to enable OpenClaw connection (default: False)
-            enable_openai: Whether to enable OpenAI connection (default: False)
+            enable_openai: 是否启用 OpenAI 连接（默认 False）
             enable_qwenpaw: Whether to enable QwenPaw connection (default: False)
-            enable_hermes: Whether to enable Hermes connection (default: False)
+            enable_hermes: 是否启用 Hermes 连接（默认 False）
         """
         if cls._instance is None:
             cls._instance = MainApp(
@@ -77,9 +77,9 @@ class MainApp:
         Args:
             enable_xiaozhi: Whether to enable XiaoZhi AI connection
             enable_openclaw: Whether to enable OpenClaw connection
-            enable_openai: Whether to enable OpenAI connection
+            enable_openai: 是否启用 OpenAI 连接
             enable_qwenpaw: Whether to enable QwenPaw connection
-            enable_hermes: Whether to enable Hermes connection
+            enable_hermes: 是否启用 Hermes 连接
         """
         if MainApp._instance is not None:
             raise Exception("MainApp is singleton, use instance() to get instance")
@@ -519,7 +519,7 @@ class MainApp:
         text: str,
         wait_response: bool = False,
     ) -> str | None:
-        """Send a message to Hermes Agent."""
+        """向 Hermes Agent 发送消息。"""
         try:
             full_text = text
             if HermesManager._rule_prompt_for_skill:
@@ -540,7 +540,7 @@ class MainApp:
         text: str,
         wait_response: bool = False,
     ) -> str | None:
-        """Send a message to Hermes Agent and play the reply."""
+        """向 Hermes Agent 发送消息并播放回复。"""
         try:
             full_text = text
             if HermesManager._rule_prompt:
@@ -557,7 +557,7 @@ class MainApp:
             return None
 
     def set_hermes_session_key(self, session_key: str):
-        """Override the Hermes long-term memory session key."""
+        """覆盖 Hermes 长期记忆使用的 Session Key。"""
         HermesManager.set_session_key(session_key)
 
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:

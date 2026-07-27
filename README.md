@@ -6,13 +6,13 @@
 
 [![New](https://img.shields.io/badge/🎉_新功能-OpenClaw_支持_自定义唤醒词_|_连续对话_|_多_Agent_路由_|_克隆音色_|_流式播放-f97316)](https://github.com/coderzc/open-xiaoai-bridge/releases)
 
-**小爱音箱与外部 AI 服务（小智 AI、OpenClaw、OpenAI 兼容服务、QwenPaw）的桥接器**
+**小爱音箱与外部 AI 服务（小智 AI、OpenClaw、OpenAI 兼容服务、Hermes、QwenPaw）的桥接器**
 
 打破小爱音箱的封闭生态，灵活接入多种 AI 服务，提供 HTTP API 实现远程控制。
 
 [📺 演示 ①](https://www.bilibili.com/video/BV1DHcBz1Ex7) · [📺 演示 ②](https://www.bilibili.com/video/BV1UQQSBHEvg)
 
-[📖 快速开始](#-快速开始) · [🔌 OpenAI 兼容服务](#-openai-兼容服务) · [🐾 QwenPaw 集成](#-qwenpaw-集成) · [🦞 OpenClaw 集成](#-openclaw-集成) · [🔧 API 文档](#-api-server) · [🐛 常见问题](#-常见问题)
+[📖 快速开始](#-快速开始) · [🔌 OpenAI 兼容服务](#-openai-兼容服务) · [🪽 Hermes 后端](#-hermes-后端) · [🐾 QwenPaw 集成](#-qwenpaw-集成) · [🦞 OpenClaw 集成](#-openclaw-集成) · [🔧 API 文档](#-api-server) · [🐛 常见问题](#-常见问题)
 
 > 本项目受 [Open-XiaoAI](https://github.com/idootop/open-xiaoai) 启发，并参考其 `examples/xiaozhi/` 示例演进而来，现已作为独立项目持续维护。
 
@@ -25,6 +25,7 @@
 | 功能                 | 说明                                                                             |
 | ------------------ | ------------------------------------------------------------------------------ |
 | 🔌 **OpenAI 兼容服务** | 接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等 `/v1/chat/completions` 服务 |
+| 🪽 **Hermes 后端** | 独立接入 Hermes，支持结构化工具进度、流式分段播报和独立 Session |
 | 🐾 **QwenPaw 集成**   | 接入 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) HTTP Console 任务接口，支持指定 Agent 和会话 |
 | 🦞 **OpenClaw 集成** | 接入 [OpenClaw](https://github.com/openclaw/openclaw)，支持连续对话，可选豆包 TTS 或小爱原生 TTS  |
 | 🤖 **小智 AI 集成**    | 接入 [xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) 实时音频流 |
@@ -109,6 +110,7 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `XIAOZHI_ENABLE`     | 启用小智 AI     | 禁用            |
 | `OPENCLAW_ENABLE`    | 启用 OpenClaw | 禁用            |
 | `OPENAI_ENABLE` | 启用 OpenAI 兼容服务 | 禁用        |
+| `HERMES_ENABLE` | 启用 Hermes 专用后端 | 禁用        |
 | `QWENPAW_ENABLE` | 启用 QwenPaw | 禁用        |
 | `API_SERVER_ENABLE`  | 启用 HTTP API | 禁用            |
 | `AUDIO_INPUT_ENABLE` | 启用音频输入（关闭后小智/KWS/local\_asr不可用） | 启用            |
@@ -390,6 +392,56 @@ if "让小黑" in text:
 ```
 
 `base_url` 可以直接填到 `/v1`，框架会自动调用 `/chat/completions`；如果你的服务已经给出完整 `/v1/chat/completions` 地址，也可以直接填写完整地址。连续对话会按 `session_key` 保存最近 `history_max_messages` 条上下文；需要隔离多个助手时，可在唤醒前调用 `app.set_openai_session_key("assistant-name")`。
+
+普通 OpenAI 入口默认保持非流式，也不会解析 Hermes 专属事件。它仍可像以前一样基础连接 Hermes；需要结构化进度和流式语音能力时，再使用下面的 Hermes 专用后端。
+
+## 🪽 Hermes 后端
+
+Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。设置 `HERMES_ENABLE=1` 启用；它有自己的配置、会话历史、生命周期和唤醒路由，不会改变 `OPENAI_ENABLE` 的行为。
+
+`config.py` 示例：
+
+```python
+"hermes": {
+    "base_url": "http://127.0.0.1:8642/v1",
+    "api_key": "",
+    "model": "hermes-agent",
+    "input_mode": "local_asr",  # 或 "xiaoai_asr"
+    "session_key": "agent:default:open-xiaoai-bridge",
+    "session_header": "X-Hermes-Session-Key",
+    "streaming": {
+        "enabled": True,
+        "sentence_min_chars": 24,
+        "sentence_max_chars": 160,
+    },
+    "progress": {
+        "enabled": True,
+        "initial_delay": 8,
+        "min_interval": 20,
+        "max_messages": 2,
+    },
+    "tts_speaker": "xiaoai",
+}
+```
+
+示例配置使用中性的“赫尔墨斯”作为唤醒名称。Hermes 路由由
+`before_wakeup` 明确配置；可以替换为任意自定义唤醒词，只需同时将
+KWS 唤醒词加入 `wakeup.keywords`：
+
+```python
+async def before_wakeup(speaker, text, source, app):
+    if source == "kws" and "赫尔墨斯" in text:
+        await speaker.play(text="赫尔墨斯来了")
+        return "hermes"
+
+    if source == "xiaoai" and text == "召唤赫尔墨斯":
+        await speaker.abort_xiaoai()
+        return "hermes"
+```
+
+Hermes 后端会解析 `hermes.tool.progress` 结构化事件，但只播报预定义的自然语言状态，不朗读工具名、参数、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
+
+若服务端不支持 SSE，且尚未播出任何最终句段，会自动回退到非流式请求。若流在最终回答已经开始播放后中断，则不会重新请求并重复整段答案。
 
 ## 🐾 QwenPaw 集成
 

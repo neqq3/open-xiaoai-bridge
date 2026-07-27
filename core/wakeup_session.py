@@ -241,7 +241,7 @@ class WakeupSessionManager:
                 kws.resume()
 
     async def _start_hermes_conversation(self):
-        """Start a Hermes Agent continuous conversation session."""
+        """启动 Hermes Agent 连续对话会话。"""
         from core.hermes_conversation import HermesConversationController
 
         kws = get_kws()
