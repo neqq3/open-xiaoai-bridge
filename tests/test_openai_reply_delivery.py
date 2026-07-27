@@ -24,7 +24,7 @@ class OpenAIReplyDeliveryTest(unittest.TestCase):
         self.manager._response_texts.clear()
         self.manager._response_tts_speakers.clear()
 
-    def test_extracts_standard_hermes_final_message(self):
+    def test_extracts_standard_openai_final_message(self):
         body = {
             "choices": [
                 {
@@ -61,7 +61,7 @@ class OpenAIReplyDeliveryTest(unittest.TestCase):
 
     def test_delayed_final_response_is_not_dropped(self):
         async def scenario():
-            run_id = "slow-hermes-run"
+            run_id = "slow-openai-run"
             loop = asyncio.get_running_loop()
             self.manager._timeout = 1
             self.manager._response_events[run_id] = loop.create_future()

@@ -24,7 +24,8 @@
 
 | 功能                 | 说明                                                                             |
 | ------------------ | ------------------------------------------------------------------------------ |
-| 🔌 **OpenAI 兼容服务** | 接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等 `/v1/chat/completions` 服务 |
+| 🔌 **OpenAI 兼容服务** | 接入 OpenAI、Ollama、LM Studio 等 `/v1/chat/completions` 服务 |
+| 🪽 **Hermes Agent** | 独立 Session、结构化工具进度、流式分句播报和安全回退 |
 | 🐾 **QwenPaw 集成**   | 接入 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) HTTP Console 任务接口，支持指定 Agent 和会话 |
 | 🦞 **OpenClaw 集成** | 接入 [OpenClaw](https://github.com/openclaw/openclaw)，支持连续对话，可选豆包 TTS 或小爱原生 TTS  |
 | 🤖 **小智 AI 集成**    | 接入 [xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) 实时音频流 |
@@ -96,7 +97,7 @@ cd open-xiaoai-bridge
 # Linux 还需要: pkg-config, patchelf
 
 # 启动（按需设置环境变量）
-API_SERVER_ENABLE=1 XIAOZHI_ENABLE=1 OPENCLAW_ENABLE=1 OPENAI_ENABLE=1 QWENPAW_ENABLE=1 ./scripts/start.sh
+API_SERVER_ENABLE=1 XIAOZHI_ENABLE=1 OPENCLAW_ENABLE=1 OPENAI_ENABLE=1 HERMES_ENABLE=1 QWENPAW_ENABLE=1 ./scripts/start.sh
 
 # 启用 Client 鉴权（需与音箱端 token 一致）
 OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
@@ -109,6 +110,7 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `XIAOZHI_ENABLE`     | 启用小智 AI     | 禁用            |
 | `OPENCLAW_ENABLE`    | 启用 OpenClaw | 禁用            |
 | `OPENAI_ENABLE` | 启用 OpenAI 兼容服务 | 禁用        |
+| `HERMES_ENABLE` | 启用 Hermes Agent 后端 | 禁用        |
 | `QWENPAW_ENABLE` | 启用 QwenPaw | 禁用        |
 | `API_SERVER_ENABLE`  | 启用 HTTP API | 禁用            |
 | `AUDIO_INPUT_ENABLE` | 启用音频输入（关闭后小智/KWS/local\_asr不可用） | 启用            |
@@ -346,7 +348,7 @@ curl -X POST http://localhost:9092/api/interrupt
 
 ## 🔌 OpenAI 兼容服务
 
-用于接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等兼容 OpenAI Chat Completions 的服务。它是独立后端，不依赖 OpenClaw 协议。
+用于接入 OpenAI、Ollama、LM Studio 等兼容 OpenAI Chat Completions 的服务。它是独立后端，不依赖 OpenClaw 协议，也不包含 Hermes 专属语义。
 
 设置 `OPENAI_ENABLE=1` 启用。
 
@@ -358,28 +360,17 @@ curl -X POST http://localhost:9092/api/interrupt
     "api_key": "",
     "model": "gpt-4o-mini",
     "input_mode": "local_asr",  # 或 "xiaoai_asr"
-    "session_key": "default",
+    "session_key": "agent:default:open-xiaoai-bridge",
+    "session_header": "",
     "system_prompt": "",
     "temperature": 0.7,
     "max_tokens": 512,
     "history_max_messages": 20,
     "tts_speaker": "xiaoai",
-    "voice": {
-        "enabled": False,             # 启用可切换语音策略
-        "default_mode": "standard",  # fast / standard / deep
-        "mode_prompts": {},           # 可选：覆盖三种模式的内置提示词
-        "hermes": {
-            "enabled": False,         # 仅连接 Hermes Agent 时开启
-            "streaming": True,
-            "sentence_min_chars": 16,
-            "sentence_max_chars": 160,
-            "progress": {
-                "enabled": True,
-                "initial_delay": 8,
-                "min_interval": 20,
-                "max_messages": 2,
-            },
-        },
+    "streaming": {
+        "enabled": False,  # 默认保持原有非流式行为
+        "sentence_min_chars": 24,
+        "sentence_max_chars": 160,
     },
 }
 ```
@@ -408,9 +399,40 @@ if "让小黑" in text:
 
 `base_url` 可以直接填到 `/v1`，框架会自动调用 `/chat/completions`；如果你的服务已经给出完整 `/v1/chat/completions` 地址，也可以直接填写完整地址。连续对话会按 `session_key` 保存最近 `history_max_messages` 条上下文；需要隔离多个助手时，可在唤醒前调用 `app.set_openai_session_key("assistant-name")`。
 
-启用 `voice.enabled` 后，当前会话可用“切换快速模式”“切换深度模式”“恢复标准模式”持久切换策略。“简单说……”和“详细查一下……”只覆盖当前一问。快速模式优先短答并减少等价查询，标准模式平衡速度和完整性，深度模式允许更充分的检索与较长回答。
+可选的 `streaming.enabled` 只解析标准 OpenAI SSE `delta.content`，并复用顺序 TTS 队列和非流式回退；默认关闭，因此已有 OpenAI/Ollama/LM Studio 配置仍走原来的整段回复链路。
 
-`voice.hermes.enabled` 是 Hermes Agent 专用增强：解析标准 OpenAI SSE 文字增量和 Hermes 的结构化工具生命周期事件；等待较久时只播报经过归类、合并和限流的自然语言状态，不会朗读工具参数、网址、日志或模型推理。最终文字按完整句进入同一个顺序 TTS 队列。若服务不支持流式且尚未播出最终答案，会自动回退到原有非流式路径；普通 OpenAI-compatible 服务应保持该开关关闭。
+## 🪽 Hermes Agent
+
+Hermes 是独立后端。它复用标准 OpenAI Chat Completions 和 SSE 文字传输，但独立管理 `X-Hermes-Session-Key`、`hermes.tool.progress`、进度语义和唤醒路由。
+
+设置 `HERMES_ENABLE=1`，并配置：
+
+```python
+"hermes": {
+    "base_url": "http://127.0.0.1:8642/v1",
+    "api_key": "",
+    "model": "hermes-agent",
+    "input_mode": "xiaoai_asr",
+    "session_key": "agent:default:open-xiaoai-bridge",
+    "session_header": "X-Hermes-Session-Key",
+    "tts_speaker": "xiaoai",
+    "streaming": {
+        "enabled": True,
+        "sentence_min_chars": 24,
+        "sentence_max_chars": 160,
+    },
+    "progress": {
+        "enabled": True,
+        "initial_delay": 8,
+        "min_interval": 20,
+        "max_messages": 2,
+    },
+}
+```
+
+在 `before_wakeup` 中返回 `"hermes"` 即进入 Hermes 连续对话。工具名、标签和生命周期保留在调试日志中；语音只使用预定义的天气、资料、音乐、家居、飞书、日程、行情等安全类别。标签中的 URL、参数、命令和原始日志不会被朗读。相同类别会合并和限流，最终文字出现后会取消尚未播放的过时进度；已经开始的短进度不会被粗暴中断，最终答案在同一个队列中紧随其后。
+
+用户说“简单讲讲”或“详细查一下”时，Bridge 不做意图改写，原始问题直接交给 Hermes。
 
 ## 🐾 QwenPaw 集成
 

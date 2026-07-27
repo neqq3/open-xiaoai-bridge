@@ -20,6 +20,8 @@ class WakeupSessionManager:
         self._openclaw_task: asyncio.Task | None = None
         self._openai_controller = None
         self._openai_task: asyncio.Task | None = None
+        self._hermes_controller = None
+        self._hermes_task: asyncio.Task | None = None
         self._qwenpaw_controller = None
         self._qwenpaw_task: asyncio.Task | None = None
         self._xiaozhi_future: asyncio.Future | None = None
@@ -72,6 +74,10 @@ class WakeupSessionManager:
             self._openai_controller.stop()
         if self._openai_task and not self._openai_task.done():
             loop.call_soon_threadsafe(self._openai_task.cancel)
+        if self._hermes_controller and self._hermes_controller.is_active():
+            self._hermes_controller.stop()
+        if self._hermes_task and not self._hermes_task.done():
+            loop.call_soon_threadsafe(self._hermes_task.cancel)
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
         if self._qwenpaw_task and not self._qwenpaw_task.done():
@@ -117,6 +123,7 @@ class WakeupSessionManager:
         for controller in (
             self._openclaw_controller,
             self._openai_controller,
+            self._hermes_controller,
             self._qwenpaw_controller,
         ):
             if controller and controller.is_active():
@@ -145,6 +152,11 @@ class WakeupSessionManager:
             "openai", {}
         ).get("session_key", "agent:default:open-xiaoai-bridge")
         OpenAIManager._session_key = default_openai_session_key
+        from core.hermes import HermesManager
+        default_hermes_session_key = self.config.get_app_config(
+            "hermes", {}
+        ).get("session_key", "agent:default:open-xiaoai-bridge")
+        HermesManager._session_key = default_hermes_session_key
         from core.qwenpaw import QwenPawManager
         default_qwenpaw_session_key = self.config.get_app_config(
             "qwenpaw", {}
@@ -169,6 +181,8 @@ class WakeupSessionManager:
             await self._start_openclaw_conversation()
         elif should_wakeup == "openai":
             await self._start_openai_conversation()
+        elif should_wakeup == "hermes":
+            await self._start_hermes_conversation()
         elif should_wakeup == "qwenpaw":
             await self._start_qwenpaw_conversation()
         elif should_wakeup == "xiaozhi":
@@ -226,6 +240,33 @@ class WakeupSessionManager:
             if kws:
                 kws.resume()
 
+    async def _start_hermes_conversation(self):
+        """Start a Hermes Agent continuous conversation session."""
+        from core.hermes_conversation import HermesConversationController
+
+        kws = get_kws()
+        if kws:
+            kws.pause()
+        try:
+            self._hermes_controller = HermesConversationController()
+            self._hermes_task = asyncio.create_task(
+                self._hermes_controller.start()
+            )
+            await self._hermes_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(
+                f"[Wakeup] Hermes conversation failed: "
+                f"{type(exc).__name__}: {exc}",
+                module="Wakeup",
+            )
+        finally:
+            self._hermes_controller = None
+            self._hermes_task = None
+            if kws:
+                kws.resume()
+
     async def _start_qwenpaw_conversation(self):
         """Start a QwenPaw continuous conversation session."""
         from core.qwenpaw_conversation import QwenPawConversationController
@@ -275,6 +316,8 @@ class WakeupSessionManager:
             self._openclaw_controller.stop()
         if self._openai_controller and self._openai_controller.is_active():
             self._openai_controller.stop()
+        if self._hermes_controller and self._hermes_controller.is_active():
+            self._hermes_controller.stop()
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
 

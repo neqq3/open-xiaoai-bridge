@@ -307,9 +307,8 @@ class ExternalConversationController:
         """Request one backend turn.
 
         Returns ``(response, already_played)``. The default implementation
-        preserves the stable non-streaming behavior. OpenAI/Hermes may
-        override it to stream sentence-safe TTS without changing the other
-        external backends.
+        preserves the stable non-streaming behavior. Streaming-capable
+        controllers may override it without changing the other backends.
         """
         full_text = text
         if self.backend._rule_prompt:

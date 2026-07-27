@@ -1,8 +1,4 @@
-"""OpenAI-compatible service manager.
-
-This module talks to any OpenAI-compatible Chat Completions endpoint,
-including Hermes Agent API server mode.
-"""
+"""Generic OpenAI-compatible service manager."""
 
 import asyncio
 import codecs
@@ -29,6 +25,13 @@ class OpenAIManager:
     """Manager for OpenAI-compatible chat backends."""
 
     XIAOAI_TTS_SPEAKER = "xiaoai"
+    CONFIG_PREFIX = "openai"
+    ENV_ENABLE = "OPENAI_ENABLE"
+    LOG_NAME = "OpenAI"
+    DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
+    DEFAULT_SESSION_HEADER = ""
 
     _initialized = False
     _reload_listener_registered = False
@@ -37,10 +40,8 @@ class OpenAIManager:
     _api_key = ""
     _model = "gpt-4o-mini"
     _session_key = "agent:default:open-xiaoai-bridge"
-    # Optional header used to send session_key to the server (e.g. Hermes'
-    # "X-Hermes-Session-Key" for long-term memory scoping). Standard OpenAI /
-    # Ollama / LM Studio ignore the unknown header; set empty to disable.
-    _session_header = "X-Hermes-Session-Key"
+    # Optional vendor session header. Generic OpenAI sends none by default.
+    _session_header = ""
     _system_prompt = ""
     _temperature: float | None = None
     _max_tokens: int | None = None
@@ -60,13 +61,13 @@ class OpenAIManager:
 
     @classmethod
     def initialize_from_config(cls, enabled: bool | None = None):
-        logger.info("[OpenAI] Initializing from config...")
+        logger.info(f"[{cls.LOG_NAME}] Initializing from config...")
         cls.reload_from_config(enabled=enabled)
         cls._initialized = True
 
     @classmethod
     def reload_from_config(cls, enabled: bool | None = None):
-        """Refresh OpenAI settings from config.py."""
+        """Refresh backend settings from config.py."""
         config_manager = ConfigManager.instance()
         if not cls._reload_listener_registered:
             config_manager.add_reload_listener(
@@ -74,23 +75,27 @@ class OpenAIManager:
             )
             cls._reload_listener_registered = True
 
-        config = config_manager.get_app_config("openai", {})
+        config = config_manager.get_app_config(cls.CONFIG_PREFIX, {})
 
         if enabled is not None:
             cls._enabled = enabled
         else:
-            env_enabled = get_env("OPENAI_ENABLE")
+            env_enabled = get_env(cls.ENV_ENABLE)
             cls._enabled = (
                 env_enabled.lower() in ("1", "true", "yes")
                 if env_enabled is not None
                 else False
             )
 
-        cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
+        cls._base_url = str(config.get("base_url", cls.DEFAULT_BASE_URL)).rstrip("/")
         cls._api_key = str(config.get("api_key", "") or "")
-        cls._model = str(config.get("model", "gpt-4o-mini"))
-        cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
-        cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
+        cls._model = str(config.get("model", cls.DEFAULT_MODEL))
+        cls._session_key = str(
+            config.get("session_key", cls.DEFAULT_SESSION_KEY)
+        )
+        cls._session_header = str(
+            config.get("session_header", cls.DEFAULT_SESSION_HEADER) or ""
+        ).strip()
         cls._system_prompt = str(config.get("system_prompt", "") or "")
         cls._timeout = int(config.get("response_timeout", 120))
         cls._history_max_messages = max(0, int(config.get("history_max_messages", 20)))
@@ -115,7 +120,8 @@ class OpenAIManager:
 
         if cls._enabled:
             logger.info(
-                f"[OpenAI] Enabled, base_url={cls._base_url}, model={cls._model}"
+                f"[{cls.LOG_NAME}] Enabled, base_url={cls._base_url}, "
+                f"model={cls._model}"
             )
 
     @classmethod
@@ -160,7 +166,8 @@ class OpenAIManager:
     @classmethod
     def set_session_key(cls, session_key: str):
         logger.info(
-            f"[OpenAI] Session key updated: {cls._session_key!r} -> {session_key!r}"
+            f"[{cls.LOG_NAME}] Session key updated: "
+            f"{cls._session_key!r} -> {session_key!r}"
         )
         cls._session_key = session_key
 
@@ -210,7 +217,7 @@ class OpenAIManager:
         if not cls._initialized:
             cls.initialize_from_config()
         if not cls._enabled:
-            logger.warning("[OpenAI] send called but backend is disabled")
+            logger.warning(f"[{cls.LOG_NAME}] send called but backend is disabled")
             return None
 
         run_id = str(uuid.uuid4())
@@ -218,7 +225,7 @@ class OpenAIManager:
         cls._response_events[run_id] = loop.create_future()
         cls._response_texts[run_id] = ""
         cls._response_tts_speakers[run_id] = cls.get_tts_speaker_for_session_key()
-        logger.user_speech(text, module=f"OpenAI({cls._session_key})")
+        logger.user_speech(text, module=f"{cls.LOG_NAME}({cls._session_key})")
         asyncio.create_task(cls._run_chat_completion(run_id, text))
         return run_id
 
@@ -226,13 +233,15 @@ class OpenAIManager:
     async def _wait_response(cls, run_id: str) -> str | None:
         event = cls._response_events.get(run_id)
         if not event:
-            logger.warning(f"[OpenAI] No event found for run {run_id}")
+            logger.warning(f"[{cls.LOG_NAME}] No event found for run {run_id}")
             return None
         try:
             await asyncio.wait_for(event, timeout=cls._timeout)
             return cls._response_texts.pop(run_id, "") or None
         except asyncio.TimeoutError:
-            logger.warning(f"[OpenAI] Timeout waiting for response (runId: {run_id})")
+            logger.warning(
+                f"[{cls.LOG_NAME}] Timeout waiting for response (runId: {run_id})"
+            )
             return None
         finally:
             cls._response_events.pop(run_id, None)
@@ -245,15 +254,19 @@ class OpenAIManager:
             response_text = await cls._request_chat_completion(text)
             if response_text:
                 cls._response_texts[run_id] = response_text
-                logger.ai_response(response_text, module=f"OpenAI({cls._session_key})")
+                logger.ai_response(
+                    response_text,
+                    module=f"{cls.LOG_NAME}({cls._session_key})",
+                )
                 logger.info(
-                    f"[OpenAI] Final response received: chars={len(response_text)}, "
+                    f"[{cls.LOG_NAME}] Final response received: "
+                    f"chars={len(response_text)}, "
                     f"elapsed={time.monotonic() - started_at:.1f}s"
                 )
         except Exception as exc:
             cls.last_error = f"{type(exc).__name__}: {exc}"
             logger.error(
-                f"[OpenAI] Chat completion failed after "
+                f"[{cls.LOG_NAME}] Chat completion failed after "
                 f"{time.monotonic() - started_at:.1f}s: {cls.last_error}"
             )
         finally:
@@ -303,19 +316,20 @@ class OpenAIManager:
         text: str,
         *,
         on_delta: Callable[[str], Awaitable[None] | None],
-        on_tool_progress: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        on_event: Callable[[Any], Awaitable[None] | None] | None = None,
     ) -> str | None:
         """Request a real OpenAI-compatible SSE stream.
 
         Standard ``delta.content`` chunks are forwarded to ``on_delta``.
-        Hermes' optional ``hermes.tool.progress`` events are forwarded as
-        structured dictionaries. Tool arguments, previews and raw payloads
-        remain inside this transport layer and are never spoken here.
+        Non-standard named events are forwarded untouched to ``on_event``.
+        Their semantics remain the responsibility of a vendor backend.
         """
         if not cls._initialized:
             cls.initialize_from_config()
         if not cls._enabled:
-            logger.warning("[OpenAI] streaming request called but backend is disabled")
+            logger.warning(
+                f"[{cls.LOG_NAME}] streaming request called but backend is disabled"
+            )
             return None
 
         session_key = cls._session_key
@@ -332,7 +346,7 @@ class OpenAIManager:
         if cls._max_tokens is not None:
             payload["max_tokens"] = cls._max_tokens
 
-        from core.openai_voice import (
+        from core.openai_stream import (
             SSEDecoder,
             extract_openai_delta,
         )
@@ -365,19 +379,9 @@ class OpenAIManager:
                 async for raw_chunk in response.content.iter_any():
                     decoded = utf8_decoder.decode(raw_chunk)
                     for event in decoder.feed(decoded):
-                        if event.event == "hermes.tool.progress":
-                            if on_tool_progress:
-                                try:
-                                    tool_event = cls._decode_tool_progress(event.data)
-                                    if tool_event:
-                                        await cls._invoke_callback(
-                                            on_tool_progress,
-                                            tool_event,
-                                        )
-                                except Exception as exc:
-                                    logger.debug(
-                                        f"[OpenAI] Ignoring malformed Hermes tool event: {exc}"
-                                    )
+                        if event.event != "message":
+                            if on_event:
+                                await cls._invoke_callback(on_event, event)
                             continue
                         if event.data == "[DONE]":
                             continue
@@ -387,7 +391,7 @@ class OpenAIManager:
                             )
                         except Exception as exc:
                             logger.debug(
-                                f"[OpenAI] Ignoring malformed SSE data event: {exc}"
+                                f"[{cls.LOG_NAME}] Ignoring malformed SSE data event: {exc}"
                             )
                             continue
                         if event_finish_reason:
@@ -398,14 +402,9 @@ class OpenAIManager:
 
                 tail = utf8_decoder.decode(b"", final=True)
                 for event in decoder.feed(tail, final=True):
-                    if event.event == "hermes.tool.progress":
-                        if on_tool_progress:
-                            tool_event = cls._decode_tool_progress(event.data)
-                            if tool_event:
-                                await cls._invoke_callback(
-                                    on_tool_progress,
-                                    tool_event,
-                                )
+                    if event.event != "message":
+                        if on_event:
+                            await cls._invoke_callback(on_event, event)
                         continue
                     if event.data == "[DONE]":
                         continue
@@ -424,9 +423,9 @@ class OpenAIManager:
             raise OpenAIStreamError("Streaming response contained no final text")
 
         cls._append_history(history, text, response_text)
-        logger.ai_response(response_text, module=f"OpenAI({session_key})")
+        logger.ai_response(response_text, module=f"{cls.LOG_NAME}({session_key})")
         logger.info(
-            f"[OpenAI] Streaming final response completed: "
+            f"[{cls.LOG_NAME}] Streaming final response completed: "
             f"chars={len(response_text)}, "
             f"elapsed={time.monotonic() - started_at:.1f}s"
         )
@@ -438,28 +437,13 @@ class OpenAIManager:
         if inspect.isawaitable(result):
             await result
 
-    @staticmethod
-    def _decode_tool_progress(data: str) -> dict[str, Any] | None:
-        import json
-
-        body = json.loads(data)
-        if not isinstance(body, dict):
-            return None
-        return {
-            "tool": body.get("tool"),
-            "status": body.get("status"),
-            "tool_call_id": body.get("toolCallId"),
-        }
-
     @classmethod
     def _headers(cls) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if cls._api_key:
             headers["Authorization"] = f"Bearer {cls._api_key}"
-        # Scope server-side long-term memory to this session (e.g. Hermes'
-        # X-Hermes-Session-Key). chat/completions stays stateless — the
-        # messages array is still the source of turn history — so this does
-        # not duplicate context.
+        # Vendor backends may opt into a session header. Generic OpenAI,
+        # Ollama and LM Studio send no extra session header by default.
         if cls._session_header and cls._session_key:
             headers[cls._session_header] = cls._session_key
         return headers
@@ -527,7 +511,9 @@ class OpenAIManager:
                     tts_speaker=cls._response_tts_speakers.get(run_id),
                 )
             else:
-                logger.warning(f"[OpenAI] No response text received for run {run_id}")
+                logger.warning(
+                    f"[{cls.LOG_NAME}] No response text received for run {run_id}"
+                )
         finally:
             cls._response_tts_speakers.pop(run_id, None)
 
@@ -546,7 +532,9 @@ class OpenAIManager:
             if resolved_tts_speaker == cls.XIAOAI_TTS_SPEAKER:
                 speaker = get_speaker()
                 if not speaker:
-                    logger.error("[OpenAI] Speaker not available for native TTS")
+                    logger.error(
+                        f"[{cls.LOG_NAME}] Speaker not available for native TTS"
+                    )
                     return False
 
                 for attempt in range(1, 3):
@@ -554,12 +542,13 @@ class OpenAIManager:
                     if played:
                         if attempt > 1:
                             logger.info(
-                                "[OpenAI] Native TTS retry completed successfully"
+                                f"[{cls.LOG_NAME}] Native TTS retry completed successfully"
                             )
                         return True
 
                     logger.warning(
-                        f"[OpenAI] Native TTS did not complete (attempt {attempt}/2)"
+                        f"[{cls.LOG_NAME}] Native TTS did not complete "
+                        f"(attempt {attempt}/2)"
                     )
                     if attempt == 1:
                         await asyncio.sleep(0.5)
@@ -572,7 +561,8 @@ class OpenAIManager:
             access_key = tts_config.get("access_key")
             if not app_id or not access_key:
                 logger.warning(
-                    "[OpenAI] Doubao TTS credentials not configured, falling back to xiaoai native tts"
+                    f"[{cls.LOG_NAME}] Doubao TTS credentials not configured, "
+                    "falling back to xiaoai native tts"
                 )
                 speaker = get_speaker()
                 if speaker:
@@ -614,7 +604,9 @@ class OpenAIManager:
                 )
             return True
         except Exception as exc:
-            logger.error(f"[OpenAI] Error playing response with TTS: {exc}")
+            logger.error(
+                f"[{cls.LOG_NAME}] Error playing response with TTS: {exc}"
+            )
             try:
                 from core.ref import get_speaker
 
@@ -622,5 +614,7 @@ class OpenAIManager:
                 if speaker:
                     return await speaker.play(text=text, blocking=True)
             except Exception as fallback_error:
-                logger.error(f"[OpenAI] Fallback TTS also failed: {fallback_error}")
+                logger.error(
+                    f"[{cls.LOG_NAME}] Fallback TTS also failed: {fallback_error}"
+                )
             return False

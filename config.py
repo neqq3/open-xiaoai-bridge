@@ -30,7 +30,8 @@ async def before_wakeup(speaker, text, source, app):
 
     返回值：
         "openclaw" — 进入 OpenClaw 连续对话流程
-        "openai"   — 进入 OpenAI 兼容服务连续对话流程（例如 Hermes Agent API Server）
+        "openai"   — 进入普通 OpenAI 兼容服务连续对话流程
+        "hermes"   — 进入 Hermes Agent 连续对话流程
         "qwenpaw"  — 进入 QwenPaw 连续对话流程
         "xiaozhi"  — 进入小智 AI 流程
         None       — 不做额外处理（可在此自行调用 app.send_to_openclaw 等）
@@ -75,6 +76,10 @@ async def before_wakeup(speaker, text, source, app):
             await speaker.play(text="小黑来了")
             return "openai"
 
+        if "超人迪迦" in text:
+            await speaker.play(text="迪迦来了")
+            return "hermes"
+
         if "小爪" in text:
             await speaker.play(text="小爪来了")
             return "qwenpaw"
@@ -99,6 +104,10 @@ async def before_wakeup(speaker, text, source, app):
         if text == "召唤小黑":
             await speaker.abort_xiaoai()
             return "openai"  # OpenAI-compatible service continuous conversation
+
+        if text == "召唤迪迦":
+            await speaker.abort_xiaoai()
+            return "hermes"  # Hermes Agent continuous conversation
 
         if text == "召唤小爪":
             await speaker.abort_xiaoai()
@@ -125,6 +134,11 @@ async def before_wakeup(speaker, text, source, app):
             await app.send_to_openai_and_play_reply(text.replace("让小黑", ""))
             return None
 
+        if "让迪迦" in text:
+            await speaker.abort_xiaoai()
+            await app.send_to_hermes_and_play_reply(text.replace("让迪迦", ""))
+            return None
+
         if "让小爪" in text:
             await speaker.abort_xiaoai()
             await app.send_to_qwenpaw_and_play_reply(text.replace("让小爪", ""))
@@ -139,8 +153,9 @@ async def after_wakeup(speaker, source=None, session_key=None):
         - 'xiaozhi': 小智对话超时退出
         - 'openclaw': OpenClaw 连续对话退出
         - 'openai': OpenAI 兼容服务连续对话退出
+        - 'hermes': Hermes Agent 连续对话退出
         - 'qwenpaw': QwenPaw 连续对话退出
-    - session_key: 当前 OpenClaw/OpenAI/QwenPaw 后端 session_key
+    - session_key: 当前 OpenClaw/OpenAI/Hermes/QwenPaw 后端 session_key
         可据此区分是哪个 Agent 退出，例如播放不同的退出提示语
     """
     if source == "openclaw":
@@ -161,6 +176,8 @@ async def after_wakeup(speaker, source=None, session_key=None):
         await speaker.play(text="龙虾，再见")
     if source == "openai":
         await speaker.play(text="小黑，再见")
+    if source == "hermes":
+        await speaker.play(text="迪迦，再见")
     if source == "qwenpaw":
         await speaker.play(text="小爪，再见")
     if source == "xiaozhi":
@@ -177,6 +194,7 @@ APP_CONFIG = {
             "龙虾你好",
             "你好小黑",
             "小黑你好",
+            "超人迪迦",
             "你好小爪",
             "小爪你好",
         ],
@@ -238,7 +256,7 @@ APP_CONFIG = {
         "OTA_URL": "http://127.0.0.1:8003/xiaozhi/ota/",
         "WEBSOCKET_URL": "ws://127.0.0.1:8000/xiaozhi/v1/",
         "WEBSOCKET_ACCESS_TOKEN": "", #（可选）一般用不到这个值
-        "DEVICE_ID": "", #（可选）默认自动生成
+        "DEVICE_ID": "a0:ad:9f:05:ad:ff", #（可选）默认自动生成
         "VERIFICATION_CODE": "", # 首次登陆时，验证码会在这里更新
     },
     "xiaoai": {
@@ -298,8 +316,8 @@ APP_CONFIG = {
         #   - 告诉 Agent 需要调用 xiaoai-tts skill 来播报，因为服务端不会自动播放
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字，调用 `xiaoai-tts` skill 播报出来。字数控制在300字以内"
     },
-    # OpenAI-compatible Service Configuration
-    # 可接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等兼容 /v1/chat/completions 的服务
+    # Generic OpenAI-compatible Service Configuration
+    # 可接入 OpenAI、Ollama、LM Studio 等兼容 /v1/chat/completions 的服务
     "openai": {
         "base_url": "http://127.0.0.1:8000/v1",
         "api_key": "",
@@ -308,13 +326,10 @@ APP_CONFIG = {
         #   - "local_asr": 使用本地 VAD + SherpaASR
         #   - "xiaoai_asr": 接管小爱原生 ASR 结果
         "input_mode": "local_asr",
-        # session_key 统一采用 agent:<agentId>:<rest> 格式，便于 after_wakeup 解析
+        # Bridge 侧对话历史隔离键。
         "session_key": "agent:default:open-xiaoai-bridge",
-        # 可选：把 session_key 作为请求头发给服务端，用于服务端长期记忆作用域。
-        # 默认设为 Hermes 的 "X-Hermes-Session-Key"；它只用于长期记忆作用域，
-        # chat/completions 仍是无状态（历史仍由 messages 携带），不会重复。
-        # 接标准 OpenAI/Ollama/LM Studio 时该头会被忽略（无害），如需彻底关闭可留空。
-        "session_header": "X-Hermes-Session-Key",
+        # 普通 OpenAI 兼容服务默认不发送任何厂商 Session Header。
+        "session_header": "",
         "system_prompt": "",
         "temperature": 0.7,
         "max_tokens": 512,
@@ -327,28 +342,46 @@ APP_CONFIG = {
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
         "extra_body": {},
-        # 可选语音交互策略。默认关闭以保持普通 OpenAI-compatible 后端
-        # 的原有请求和整段 TTS 行为；启用后默认进入 standard 模式。
-        "voice": {
+        # 通用 OpenAI SSE 流式文字。默认关闭，保持原有非流式行为。
+        # 开启后只处理标准 delta.content，不解释厂商专属事件。
+        "streaming": {
             "enabled": False,
-            "default_mode": "standard",  # fast / standard / deep
-            # 可选覆盖 fast / standard / deep 的内置提示词。
-            "mode_prompts": {},
-            # Hermes Agent 专用增强。不要为未知的 OpenAI-compatible
-            # 服务开启；SSE 不可用时会在尚未播出答案的前提下安全回退。
-            "hermes": {
-                "enabled": False,
-                "streaming": True,
-                # 完整句形成后才进入顺序播放队列，避免乱序和 TTS 重叠。
-                "sentence_min_chars": 16,
-                "sentence_max_chars": 160,
-                "progress": {
-                    "enabled": True,
-                    "initial_delay": 8,
-                    "min_interval": 20,
-                    "max_messages": 2,
-                },
-            },
+            "sentence_min_chars": 24,
+            "sentence_max_chars": 160,
+        },
+    },
+    # Hermes Agent API Server
+    # Hermes 使用 OpenAI Chat Completions 作为基础传输，但拥有独立的
+    # Session Header、结构化工具进度和语音进度语义。
+    "hermes": {
+        "base_url": "http://127.0.0.1:8642/v1",
+        "api_key": "",
+        "model": "hermes-agent",
+        "input_mode": "local_asr",
+        "session_key": "agent:default:open-xiaoai-bridge",
+        "session_header": "X-Hermes-Session-Key",
+        "system_prompt": "",
+        "temperature": 0.7,
+        "max_tokens": 512,
+        "history_max_messages": 20,
+        "response_timeout": 120,
+        "tts_speed": 1.0,
+        "tts_speaker": "xiaoai",
+        "session_tts_speakers": {},
+        "exit_keywords": ["退出", "停止", "再见"],
+        "rule_prompt": "注意：将结果处理成适合语音朗读的纯文字，不要返回 Markdown、代码块、网址、文件路径、命令、工具日志或推理过程",
+        "rule_prompt_for_skill": "注意：这条消息来自小爱音箱，用户看不到文字回复，请返回适合直接朗读的纯文字",
+        "extra_body": {},
+        "streaming": {
+            "enabled": True,
+            "sentence_min_chars": 24,
+            "sentence_max_chars": 160,
+        },
+        "progress": {
+            "enabled": True,
+            "initial_delay": 8,
+            "min_interval": 20,
+            "max_messages": 2,
         },
     },
     # QwenPaw Configuration

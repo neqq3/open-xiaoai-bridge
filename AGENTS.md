@@ -20,6 +20,15 @@ open-xiaoai-bridge/
 │   ├── xiaozhi.py                 # 小智 AI WebSocket 协议客户端
 │   ├── openclaw.py                # OpenClaw 网关客户端（连接、消息、TTS 播放）
 │   ├── openclaw_conversation.py   # OpenClaw 连续对话循环（VAD → ASR → Agent → TTS）
+│   ├── openai.py                  # 通用 OpenAI-compatible HTTP/SSE 客户端
+│   ├── openai_conversation.py     # 普通 OpenAI 连续对话入口
+│   ├── hermes.py                  # Hermes Session 与结构化事件适配
+│   ├── hermes_conversation.py     # Hermes 流式连续对话入口
+│   ├── hermes_progress.py         # Hermes 工具进度安全语义
+│   ├── openai_stream.py           # 通用 SSE 与句段聚合
+│   ├── streaming_conversation.py  # 通用流式回复与非流式回退
+│   ├── speech_queue.py            # 防竞态的单工作线程语音队列
+│   ├── qwenpaw.py                 # QwenPaw HTTP 任务客户端
 │   ├── wakeup_session.py          # 小智唤醒会话状态机
 │   ├── ref.py                     # 全局引用注册表（get/set 依赖注入）
 │   ├── models/                    # 模型文件（KWS/VAD/ASR，.gitignore 排除）
@@ -61,7 +70,7 @@ open-xiaoai-bridge/
 
 应用主控制器，单例模式，管理全部服务生命周期。
 
-- `instance(enable_xiaozhi, enable_openclaw)` → 单例获取
+- `instance(enable_xiaozhi, enable_openclaw, enable_openai, enable_qwenpaw, enable_hermes)` → 单例获取
 - `run(enable_api_server)` → 启动各服务
 - `set_device_state(state)` → 管理设备状态（IDLE / LISTENING / SPEAKING / CONNECTING）
 - `send_text(text)` → 发送文本到小智
@@ -171,6 +180,9 @@ OpenClaw 连续对话控制器。唤醒词触发后进入独立的 VAD → ASR �
 **路由规则**（`before_wakeup` 返回值）:
 - `"xiaozhi"` → 走小智流程
 - `"openclaw"` → 走 OpenClaw 连续对话
+- `"openai"` → 走普通 OpenAI-compatible 连续对话
+- `"hermes"` → 走 Hermes Agent 连续对话
+- `"qwenpaw"` → 走 QwenPaw 连续对话
 - `None` → 不处理（用户自行处理）
 
 **边界约束**:
@@ -272,6 +284,21 @@ XIAOZHI_ENABLE=1 OPENCLAW_ENABLE=1 uv run main.py
 - config.py `before_wakeup` 按唤醒词路由到小智或 OpenClaw 连续对话
 - OpenClaw 连续对话：VAD → ASR → OpenClaw → TTS 循环
 - 退出关键词：config `openclaw.exit_keywords`
+
+### 模式 5: 普通 OpenAI-compatible
+```bash
+OPENAI_ENABLE=1 uv run main.py
+```
+- 默认保持非流式整段回复
+- 可选开启标准 OpenAI SSE；不解析 Hermes 专属事件
+
+### 模式 6: Hermes Agent
+```bash
+HERMES_ENABLE=1 uv run main.py
+```
+- 独立 Hermes Session 和唤醒路由
+- 复用通用 SSE/句段/TTS 队列，独立解释 `hermes.tool.progress`
+- 回答深度由 Hermes 理解原始问题，Bridge 不维护语音模式
 
 ### 启用 API Server
 ```bash
