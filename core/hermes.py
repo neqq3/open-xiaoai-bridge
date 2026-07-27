@@ -1,18 +1,24 @@
-"""Hermes Agent backend built on the OpenAI-compatible transport."""
+"""基于 OpenAI-compatible 传输的 Hermes Agent 专用后端。"""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+import inspect
 from typing import Any
 
+import open_xiaoai_server
+
+from core.hermes_progress import HermesToolProgress
 from core.openai import OpenAIManager
+from core.openai_stream import stream_openai_chat_completion
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
 
 
 class HermesManager(OpenAIManager):
-    """Hermes-specific backend with isolated configuration and session state."""
+    """使用独立配置与会话状态的 Hermes 专用后端。"""
 
     CONFIG_PREFIX = "hermes"
     ENV_ENABLE = "HERMES_ENABLE"
@@ -22,8 +28,7 @@ class HermesManager(OpenAIManager):
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     DEFAULT_SESSION_HEADER = "X-Hermes-Session-Key"
 
-    # Hermes and generic OpenAI may be enabled together, so every mutable
-    # runtime field must belong to this subclass rather than the parent.
+    # Hermes 和普通 OpenAI 可同时启用，因此可变运行状态必须由子类独立持有。
     _initialized = False
     _reload_listener_registered = False
     _enabled = False
@@ -57,7 +62,7 @@ class HermesManager(OpenAIManager):
 
     @classmethod
     def reload_from_config(cls, enabled: bool | None = None):
-        """Refresh Hermes settings without touching generic OpenAI state."""
+        """刷新 Hermes 配置，不触碰普通 OpenAI 的状态。"""
 
         config_manager = ConfigManager.instance()
         if not cls._reload_listener_registered:
@@ -131,3 +136,144 @@ class HermesManager(OpenAIManager):
             f"{cls._session_key!r} -> {session_key!r}"
         )
         cls._session_key = session_key
+
+    @classmethod
+    async def request_streaming_chat_completion(
+        cls,
+        text: str,
+        *,
+        on_delta: Callable[[str], Awaitable[None] | None],
+        on_tool_progress: (
+            Callable[[HermesToolProgress], Awaitable[None] | None]
+            | None
+        ) = None,
+    ) -> str:
+        """流式接收标准文本和 Hermes 工具生命周期事件。"""
+
+        async def on_event(event):
+            if event.event != "hermes.tool.progress":
+                logger.debug(
+                    f"Ignoring unsupported SSE event: {event.event}",
+                    module="Hermes",
+                )
+                return
+            try:
+                progress = HermesToolProgress.from_json(event.data)
+            except Exception as exc:
+                logger.debug(
+                    f"Ignoring malformed tool progress event: {exc}",
+                    module="Hermes",
+                )
+                return
+            if not progress:
+                return
+            logger.debug(
+                f"Tool progress event: {progress.technical_log()}",
+                module="Hermes",
+            )
+            if on_tool_progress:
+                result = on_tool_progress(progress)
+                if inspect.isawaitable(result):
+                    await result
+
+        return await stream_openai_chat_completion(
+            cls,
+            text,
+            on_delta=on_delta,
+            on_event=on_event,
+            log_name="Hermes",
+        )
+
+    @classmethod
+    async def _play_response_with_tts(
+        cls,
+        text: str,
+        tts_speaker: str | None = None,
+        playback_token: int | None = None,
+    ) -> bool:
+        """通过带完整性检查的 TTS 播放 Hermes 回复。"""
+
+        from core.ref import get_speaker
+
+        try:
+            resolved_tts_speaker = (
+                tts_speaker
+                or cls.get_tts_speaker_for_session_key()
+            )
+            if resolved_tts_speaker == cls.XIAOAI_TTS_SPEAKER:
+                speaker = get_speaker()
+                if not speaker:
+                    logger.error(
+                        "Speaker not available for native TTS",
+                        module="Hermes",
+                    )
+                    return False
+                return await speaker.play_verified_text(text)
+
+            from core.services.tts.doubao import DoubaoTTS
+
+            tts_config = ConfigManager.instance().get_app_config(
+                "tts.doubao",
+                {},
+            )
+            app_id = tts_config.get("app_id")
+            access_key = tts_config.get("access_key")
+            if not app_id or not access_key:
+                logger.warning(
+                    "Doubao TTS credentials not configured; "
+                    "using verified native TTS",
+                    module="Hermes",
+                )
+                speaker = get_speaker()
+                return (
+                    await speaker.play_verified_text(text)
+                    if speaker
+                    else False
+                )
+
+            speaker_id = resolved_tts_speaker or tts_config.get(
+                "default_speaker",
+                "zh_female_xiaohe_uranus_bigtts",
+            )
+            tts = DoubaoTTS(
+                app_id=app_id,
+                access_key=access_key,
+                speaker=speaker_id,
+            )
+            resolved_format = tts.resolve_audio_format(text)
+            if tts_config.get("stream", False):
+                await open_xiaoai_server.tts_stream_play(
+                    text,
+                    app_id=app_id,
+                    access_key=access_key,
+                    resource_id=tts.resource_id,
+                    speaker=speaker_id,
+                    speed=cls._tts_speed,
+                    format=resolved_format,
+                    sample_rate=24000,
+                    playback_token=playback_token,
+                )
+            else:
+                await open_xiaoai_server.tts_play(
+                    text,
+                    app_id=app_id,
+                    access_key=access_key,
+                    resource_id=tts.resource_id,
+                    speaker=speaker_id,
+                    speed=cls._tts_speed,
+                    format=resolved_format,
+                    sample_rate=24000,
+                    playback_token=playback_token,
+                )
+            return True
+        except Exception as exc:
+            logger.error(
+                f"TTS playback failed: {type(exc).__name__}: {exc}",
+                module="Hermes",
+            )
+            speaker = get_speaker()
+            return (
+                await speaker.play_verified_text(text)
+                if speaker
+                else False
+            )

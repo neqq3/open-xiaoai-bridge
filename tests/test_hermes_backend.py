@@ -1,5 +1,7 @@
 import ast
+import asyncio
 import importlib
+import importlib.util
 import sys
 import types
 import unittest
@@ -131,6 +133,97 @@ class HermesBackendTest(unittest.TestCase):
         self.assertNotIn("hermes.tool.progress", source)
         self.assertNotIn("HERMES_ENABLE", source)
         self.assertNotIn("HermesManager", source)
+
+    def test_only_hermes_interprets_hermes_progress_events(self):
+        progress = []
+
+        async def fake_stream(
+            _manager,
+            _text,
+            *,
+            on_delta,
+            on_event,
+            log_name,
+        ):
+            del on_delta, log_name
+            event = types.SimpleNamespace(
+                event="hermes.tool.progress",
+                data=(
+                    '{"tool":"weather","status":"running",'
+                    '"toolCallId":"call-1"}'
+                ),
+            )
+            await on_event(event)
+            return "完成"
+
+        async def scenario():
+            with mock.patch.object(
+                self.hermes_module,
+                "stream_openai_chat_completion",
+                side_effect=fake_stream,
+            ):
+                return await self.hermes.request_streaming_chat_completion(
+                    "天气怎么样",
+                    on_delta=lambda _value: None,
+                    on_tool_progress=lambda event: progress.append(event),
+                )
+
+        self.assertEqual("完成", asyncio.run(scenario()))
+        self.assertEqual(["weather"], [event.tool for event in progress])
+
+    def test_example_routes_send_neutral_name_directly_to_hermes(self):
+        spec = importlib.util.spec_from_file_location(
+            "hermes_route_config_test",
+            ROOT / "config.py",
+        )
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+        speaker = types.SimpleNamespace(
+            play=mock.AsyncMock(),
+            abort_xiaoai=mock.AsyncMock(),
+        )
+        app = types.SimpleNamespace()
+
+        kws_result = asyncio.run(
+            config_module.before_wakeup(
+                speaker,
+                "你好赫尔墨斯",
+                "kws",
+                app,
+            )
+        )
+        xiaoai_result = asyncio.run(
+            config_module.before_wakeup(
+                speaker,
+                "召唤赫尔墨斯",
+                "xiaoai",
+                app,
+            )
+        )
+
+        self.assertEqual("hermes", kws_result)
+        self.assertEqual("hermes", xiaoai_result)
+        speaker.abort_xiaoai.assert_awaited_once()
+
+    def test_generic_openai_defaults_do_not_gain_streaming_options(self):
+        spec = importlib.util.spec_from_file_location(
+            "hermes_config_boundary_test",
+            ROOT / "config.py",
+        )
+        config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config_module)
+
+        openai_config = config_module.APP_CONFIG["openai"]
+        hermes_config = config_module.APP_CONFIG["hermes"]
+
+        self.assertEqual(
+            "X-Hermes-Session-Key",
+            openai_config["session_header"],
+        )
+        self.assertNotIn("streaming", openai_config)
+        self.assertNotIn("progress", openai_config)
+        self.assertTrue(hermes_config["streaming"]["enabled"])
+        self.assertTrue(hermes_config["progress"]["enabled"])
 
 
 if __name__ == "__main__":
