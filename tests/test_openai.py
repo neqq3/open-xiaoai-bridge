@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import importlib
 import sys
 import types
@@ -58,6 +59,226 @@ class OpenAIHeadersTest(unittest.TestCase):
             "agent:default:open-xiaoai-bridge",
             headers["X-Vendor-Session"],
         )
+
+
+class OpenAIRequestCompatibilityTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("open_xiaoai_server", types.SimpleNamespace())
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        sys.modules.pop("core.openai", None)
+        self.module = importlib.import_module("core.openai")
+        self.manager = self.module.OpenAIManager
+        self.manager._initialized = True
+        self.manager._enabled = True
+        self.manager._api_key = ""
+        self.manager._session_header = ""
+        self.manager._session_key = "plain-session"
+        self.manager._system_prompt = ""
+        self.manager._temperature = None
+        self.manager._max_tokens = None
+        self.manager._timeout = 10
+        self.manager._history_max_messages = 20
+        self.manager._extra_body = {}
+        self.manager._sessions.clear()
+
+    def _request(self, response_body, *, chunks=None):
+        captured = {}
+
+        class FakeContent:
+            async def iter_any(self):
+                for chunk in chunks or []:
+                    yield chunk
+
+        class FakeResponse:
+            status = 200
+            headers = {
+                "Content-Type": (
+                    "text/event-stream" if chunks is not None else "application/json"
+                )
+            }
+            content = FakeContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def json(self, **_kwargs):
+                return response_body
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                captured["session_kwargs"] = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def post(self, url, **kwargs):
+                captured["url"] = url
+                captured.update(kwargs)
+                return FakeResponse()
+
+        return captured, FakeSession
+
+    def test_plain_openai_non_streaming_request_preserves_original_shape(self):
+        self.manager._base_url = "https://api.example.test/v1"
+        self.manager._api_key = "secret"
+        self.manager._model = "gpt-compatible"
+        self.manager._system_prompt = "system"
+        self.manager._temperature = 0.25
+        self.manager._max_tokens = 256
+        captured, fake_session = self._request(
+            {"choices": [{"message": {"content": "回答"}}]}
+        )
+
+        async def scenario():
+            with (
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientSession",
+                    fake_session,
+                ),
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientTimeout",
+                    lambda **kwargs: kwargs,
+                ),
+            ):
+                return await self.manager._request_chat_completion("问题")
+
+        self.assertEqual("回答", asyncio.run(scenario()))
+        self.assertEqual(
+            "https://api.example.test/v1/chat/completions",
+            captured["url"],
+        )
+        self.assertEqual(
+            {
+                "model": "gpt-compatible",
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "问题"},
+                ],
+                "stream": False,
+                "temperature": 0.25,
+                "max_tokens": 256,
+            },
+            captured["json"],
+        )
+        self.assertEqual(
+            {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer secret",
+            },
+            captured["headers"],
+        )
+
+    def test_ollama_style_request_needs_no_auth_or_config_change(self):
+        self.manager._base_url = "http://127.0.0.1:11434/v1"
+        self.manager._model = "qwen2.5:7b"
+        captured, fake_session = self._request(
+            {"choices": [{"message": {"content": "本地回答"}}]}
+        )
+
+        async def scenario():
+            with (
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientSession",
+                    fake_session,
+                ),
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientTimeout",
+                    lambda **kwargs: kwargs,
+                ),
+            ):
+                return await self.manager._request_chat_completion("本地问题")
+
+        self.assertEqual("本地回答", asyncio.run(scenario()))
+        self.assertEqual(
+            "http://127.0.0.1:11434/v1/chat/completions",
+            captured["url"],
+        )
+        self.assertEqual("qwen2.5:7b", captured["json"]["model"])
+        self.assertFalse(captured["json"]["stream"])
+        self.assertEqual(
+            {"Content-Type": "application/json"},
+            captured["headers"],
+        )
+
+    def test_standard_openai_sse_is_parsed_without_vendor_semantics(self):
+        self.manager._base_url = "http://127.0.0.1:1234/v1"
+        self.manager._model = "local-model"
+        payload = (
+            'data: {"choices":[{"delta":{"content":"第一句。"},'
+            '"finish_reason":null}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"第二句。"},'
+            '"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n\n"
+        ).encode()
+        captured, fake_session = self._request(
+            None,
+            chunks=[payload[:31], payload[31:87], payload[87:]],
+        )
+        deltas = []
+
+        async def scenario():
+            with (
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientSession",
+                    fake_session,
+                ),
+                mock.patch.object(
+                    self.module.aiohttp,
+                    "ClientTimeout",
+                    lambda **kwargs: kwargs,
+                ),
+                mock.patch.object(self.module.logger, "ai_response"),
+            ):
+                return await self.manager.request_streaming_chat_completion(
+                    "问题",
+                    on_delta=lambda value: deltas.append(value),
+                )
+
+        self.assertEqual("第一句。第二句。", asyncio.run(scenario()))
+        self.assertEqual(["第一句。", "第二句。"], deltas)
+        self.assertTrue(captured["json"]["stream"])
+        self.assertEqual(
+            {"Content-Type": "application/json"},
+            captured["headers"],
+        )
+
+
+class MainAppCompatibilityTest(unittest.TestCase):
+    def test_hermes_flag_is_appended_after_existing_positional_arguments(self):
+        tree = ast.parse((ROOT / "core" / "app.py").read_text(encoding="utf-8"))
+        main_app = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "MainApp"
+        )
+        expected = [
+            "enable_xiaozhi",
+            "enable_openclaw",
+            "enable_openai",
+            "enable_qwenpaw",
+            "enable_hermes",
+        ]
+        for method_name in ("instance", "__init__"):
+            method = next(
+                node
+                for node in main_app.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == method_name
+            )
+            argument_names = [argument.arg for argument in method.args.args]
+            self.assertEqual(expected, argument_names[-len(expected) :])
 
 
 class _Config:
