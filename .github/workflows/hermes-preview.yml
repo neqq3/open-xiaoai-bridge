@@ -105,7 +105,7 @@ jobs:
           docker run --rm \
             --entrypoint /app/.venv/bin/python \
             "${IMAGE}@${DIGEST}" \
-            -c "import open_xiaoai_server, platform; expected = {'amd64': 'x86_64', 'arm64': 'aarch64'}['${EXPECTED_ARCH}']; actual = platform.machine(); assert actual == expected, (actual, expected); assert open_xiaoai_server.__file__.endswith('.so'), open_xiaoai_server.__file__; print('native_extension=' + open_xiaoai_server.__file__); print('machine=' + actual)"
+            -c "import importlib, platform; native = importlib.import_module('open_xiaoai_server.open_xiaoai_server'); expected = {'amd64': 'x86_64', 'arm64': 'aarch64'}['${EXPECTED_ARCH}']; actual = platform.machine(); assert actual == expected, (actual, expected); assert native.__file__.endswith('.so'), native.__file__; assert hasattr(native, 'start_server'); print('native_extension=' + native.__file__); print('machine=' + actual)"
           echo "platform=${{ matrix.platform }}" >> "$GITHUB_STEP_SUMMARY"
           echo "digest=${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
