@@ -37,15 +37,43 @@ class WakeupKeywordStartupTest(unittest.TestCase):
         self.assertTrue(should_run)
         self.assertEqual(reason, "")
 
+    def test_keyword_generation_enabled_for_hermes(self):
+        spec = importlib.util.spec_from_file_location(
+            "kws_keywords_for_hermes_test",
+            ROOT / "core/services/audio/kws/keywords.py",
+        )
+        keywords = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(keywords)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XIAOZHI_ENABLE": "",
+                "OPENCLAW_ENABLE": "",
+                "OPENCLAW_ENABLED": "",
+                "OPENAI_ENABLE": "",
+                "HERMES_ENABLE": "1",
+                "QWENPAW_ENABLE": "",
+            },
+            clear=False,
+        ):
+            should_run, reason = keywords.should_generate_keywords()
+
+        self.assertTrue(should_run)
+        self.assertEqual(reason, "")
+
     def test_startup_entrypoints_prepare_keywords_for_openai(self):
         start_sh = (ROOT / "scripts/start.sh").read_text(encoding="utf8")
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf8")
 
         self.assertIn("OPENAI_ENABLE_VALUE", start_sh)
+        self.assertIn("HERMES_ENABLE_VALUE", start_sh)
         self.assertIn("QWENPAW_ENABLE_VALUE", start_sh)
         self.assertIn('[[ "$OPENAI_ENABLE_VALUE" =~ ^(1|true|yes)$ ]]', start_sh)
+        self.assertIn('[[ "$HERMES_ENABLE_VALUE" =~ ^(1|true|yes)$ ]]', start_sh)
         self.assertIn('[[ "$QWENPAW_ENABLE_VALUE" =~ ^(1|true|yes)$ ]]', start_sh)
         self.assertIn('${OPENAI_ENABLE:-}', dockerfile)
+        self.assertIn('${HERMES_ENABLE:-}', dockerfile)
         self.assertIn('${QWENPAW_ENABLE:-}', dockerfile)
         self.assertIn('python core/services/audio/kws/keywords.py', dockerfile)
 
