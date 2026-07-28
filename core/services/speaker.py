@@ -121,7 +121,8 @@ class SpeakerManager:
 
         max_attempts = max(1, int(attempts))
         for index, chunk in enumerate(chunks, start=1):
-            escaped_text = chunk.replace("'", "'\\''")
+            safe_chunk = self._protect_native_tts_option_prefix(chunk)
+            escaped_text = safe_chunk.replace("'", "'\\''")
             command = f"/usr/sbin/tts_play.sh '{escaped_text}'"
             completed = False
             for attempt in range(1, max_attempts + 1):
@@ -203,6 +204,14 @@ class SpeakerManager:
             if ord(char) >= 32 or char in "\r\n\t"
         )
         return " ".join(normalized.split())
+
+    @staticmethod
+    def _protect_native_tts_option_prefix(text: str) -> str:
+        """避免片段开头的连字符被设备脚本误判为命令选项。"""
+
+        if text.startswith("-"):
+            return "－" + text[1:]
+        return text
 
     @classmethod
     def _split_native_tts_text(cls, text: str) -> list[str]:
