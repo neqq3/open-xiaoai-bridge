@@ -116,6 +116,40 @@ class VerifiedNativeTTSTest(unittest.TestCase):
         self.assertNotIn('"', "".join(commands))
         self.assertNotIn("\n", "".join(commands))
 
+    def test_verified_path_protects_only_leading_hyphen(self):
+        completed = "\n".join(
+            [
+                "2026[/usr/sbin/tts_play.sh] - Starting play flow",
+                "2026[/usr/sbin/tts_play.sh] - "
+                "Audio playback completed successfully",
+            ]
+        )
+        self.speaker.run_shell = mock.AsyncMock(
+            return_value=self.command_result(completed, "", 0)
+        )
+
+        first_result = asyncio.run(
+            self.speaker.play_verified_text("- 第一项")
+        )
+        second_result = asyncio.run(
+            self.speaker.play_verified_text("1. 第一项")
+        )
+
+        self.assertTrue(first_result)
+        self.assertTrue(second_result)
+        commands = [
+            call.args[0]
+            for call in self.speaker.run_shell.await_args_list
+        ]
+        self.assertEqual(
+            "/usr/sbin/tts_play.sh '－ 第一项'",
+            commands[0],
+        )
+        self.assertEqual(
+            "/usr/sbin/tts_play.sh '1. 第一项'",
+            commands[1],
+        )
+
     def test_diagnostics_redact_text_and_are_bounded(self):
         output = (
             "2026 - Text to speech: private words\n"
