@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 import inspect
 from typing import Any
 
+import aiohttp
 import open_xiaoai_server
 
 from core.hermes_progress import HermesToolProgress
@@ -27,6 +28,7 @@ class HermesManager(OpenAIManager):
     DEFAULT_MODEL = "hermes-agent"
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     DEFAULT_SESSION_HEADER = "X-Hermes-Session-Key"
+    SESSION_ID_HEADER = "X-Hermes-Session-Id"
 
     # Hermes 和普通 OpenAI 可同时启用，因此可变运行状态必须由子类独立持有。
     _initialized = False
@@ -49,6 +51,7 @@ class HermesManager(OpenAIManager):
     _rule_prompt = ""
     _rule_prompt_for_skill = ""
     _sessions: dict[str, list[dict[str, str]]] = {}
+    _hermes_session_ids: dict[str, str] = {}
     _response_events: dict[str, asyncio.Future] = {}
     _response_texts: dict[str, str] = {}
     _response_tts_speakers: dict[str, str | None] = {}
@@ -136,6 +139,95 @@ class HermesManager(OpenAIManager):
             f"{cls._session_key!r} -> {session_key!r}"
         )
         cls._session_key = session_key
+
+    @classmethod
+    def reset_session(cls, session_key: str | None = None):
+        """Discard both Bridge text history and Hermes' native transcript."""
+
+        target_session_key = session_key or cls._session_key
+        super().reset_session(target_session_key)
+        cls._hermes_session_ids.pop(target_session_key, None)
+
+    @classmethod
+    def begin_conversation(cls):
+        """Start one wake-up conversation without replaying an older turn."""
+
+        cls.reset_session()
+        logger.info(
+            "Started a fresh voice conversation",
+            module="Hermes",
+        )
+
+    @classmethod
+    def _capture_response_headers(
+        cls,
+        headers,
+        *,
+        session_key: str,
+    ):
+        session_id = str(
+            headers.get(cls.SESSION_ID_HEADER, "") or ""
+        ).strip()
+        if not session_id:
+            return
+        cls._hermes_session_ids[session_key] = session_id
+        logger.debug(
+            f"Captured native session id for {session_key!r}",
+            module="Hermes",
+        )
+
+    @classmethod
+    def _headers(cls) -> dict[str, str]:
+        headers = super()._headers()
+        session_id = cls._hermes_session_ids.get(cls._session_key)
+        if session_id:
+            headers[cls.SESSION_ID_HEADER] = session_id
+        return headers
+
+    @classmethod
+    async def _request_chat_completion(cls, text: str) -> str | None:
+        """Send a non-streaming turn while retaining Hermes session state."""
+
+        session_key = cls._session_key
+        history = cls._sessions.setdefault(session_key, [])
+        payload: dict[str, Any] = {
+            "model": cls._model,
+            "messages": cls._build_messages(history, text),
+            "stream": False,
+            **cls._extra_body,
+        }
+        if cls._temperature is not None:
+            payload["temperature"] = cls._temperature
+        if cls._max_tokens is not None:
+            payload["max_tokens"] = cls._max_tokens
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=cls._timeout)
+        ) as session:
+            async with session.post(
+                cls._chat_completions_url(),
+                json=payload,
+                headers=cls._headers(),
+            ) as response:
+                body = await response.json(content_type=None)
+                if response.status >= 400:
+                    message = (
+                        body.get("error", body)
+                        if isinstance(body, dict)
+                        else body
+                    )
+                    raise RuntimeError(
+                        f"HTTP {response.status}: {message}"
+                    )
+                cls._capture_response_headers(
+                    response.headers,
+                    session_key=session_key,
+                )
+
+        response_text = cls._extract_response_text(body)
+        if response_text:
+            cls._append_history(history, text, response_text)
+        return response_text
 
     @classmethod
     async def request_streaming_chat_completion(

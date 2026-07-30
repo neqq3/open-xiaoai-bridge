@@ -218,6 +218,10 @@ async def stream_openai_chat_completion(
                 raise OpenAIStreamError(
                     f"Streaming unsupported: Content-Type={content_type!r}"
                 )
+            manager._capture_response_headers(
+                response.headers,
+                session_key=session_key,
+            )
 
             async for raw_chunk in response.content.iter_any():
                 decoded = utf8_decoder.decode(raw_chunk)

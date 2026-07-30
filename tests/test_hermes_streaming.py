@@ -58,6 +58,26 @@ class HermesStreamingTest(unittest.TestCase):
         self.controller._stop_recording = mock.AsyncMock()
         self.controller._play_send_sound = mock.AsyncMock()
 
+    def test_start_opens_fresh_hermes_conversation(self):
+        self.controller.active = False
+        self.controller.backend = types.SimpleNamespace(
+            begin_conversation=mock.Mock()
+        )
+
+        async def scenario():
+            with mock.patch.object(
+                self.module.StreamingConversationController,
+                "start",
+                new=mock.AsyncMock(),
+            ) as parent_start:
+                await self.controller.start()
+                return parent_start
+
+        parent_start = asyncio.run(scenario())
+
+        self.controller.backend.begin_conversation.assert_called_once_with()
+        parent_start.assert_awaited_once_with()
+
     def test_final_sentence_starts_before_stream_finishes(self):
         async def scenario():
             first_spoken = asyncio.Event()

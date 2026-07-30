@@ -116,6 +116,7 @@ class OpenAIStreamHelpersTest(unittest.TestCase):
             ],
             _chat_completions_url=lambda: "http://example.test/v1/chat/completions",
             _headers=lambda: {"Content-Type": "application/json"},
+            _capture_response_headers=mock.Mock(),
             _append_history=lambda history, text, response: history.extend(
                 [
                     {"role": "user", "content": text},
@@ -152,6 +153,10 @@ class OpenAIStreamHelpersTest(unittest.TestCase):
         self.assertEqual(["最终答案。"], deltas)
         self.assertEqual(["vendor.progress"], [event.event for event in events])
         self.assertEqual('{"internal":"opaque"}', events[0].data)
+        manager._capture_response_headers.assert_called_once_with(
+            FakeResponse.headers,
+            session_key="agent:test",
+        )
 
 
 if __name__ == "__main__":

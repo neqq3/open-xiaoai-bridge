@@ -48,6 +48,7 @@ class HermesBackendTest(unittest.TestCase):
     def tearDown(self):
         self.openai._sessions.clear()
         self.hermes._sessions.clear()
+        self.hermes._hermes_session_ids.clear()
 
     def test_openai_and_hermes_runtime_state_are_isolated(self):
         self.openai._session_key = "plain-openai"
@@ -67,6 +68,106 @@ class HermesBackendTest(unittest.TestCase):
             self.hermes._headers()["X-Hermes-Session-Key"],
         )
         self.assertEqual({}, self.hermes._sessions)
+
+    def test_hermes_native_session_id_is_reused_within_conversation(self):
+        self.hermes._session_key = "agent:hermes:speaker"
+
+        self.hermes._capture_response_headers(
+            {"X-Hermes-Session-Id": "session-123"},
+            session_key=self.hermes._session_key,
+        )
+
+        self.assertEqual(
+            "session-123",
+            self.hermes._headers()["X-Hermes-Session-Id"],
+        )
+
+    def test_new_conversation_discards_old_text_and_native_session(self):
+        self.hermes._session_key = "agent:hermes:speaker"
+        self.hermes._sessions[self.hermes._session_key] = [
+            {"role": "assistant", "content": "昨天已经播放"}
+        ]
+        self.hermes._hermes_session_ids[self.hermes._session_key] = (
+            "session-yesterday"
+        )
+
+        self.hermes.begin_conversation()
+
+        self.assertNotIn(
+            self.hermes._session_key,
+            self.hermes._sessions,
+        )
+        self.assertNotIn(
+            self.hermes._session_key,
+            self.hermes._hermes_session_ids,
+        )
+
+    def test_non_streaming_response_captures_native_session_id(self):
+        class FakeResponse:
+            status = 200
+            headers = {"X-Hermes-Session-Id": "session-fallback"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def json(self, **_kwargs):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "回退回答"
+                            }
+                        }
+                    ]
+                }
+
+        class FakeSession:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        self.hermes._session_key = "agent:hermes:fallback"
+        self.hermes._model = "hermes-agent"
+        self.hermes._extra_body = {}
+        self.hermes._temperature = None
+        self.hermes._max_tokens = None
+        self.hermes._timeout = 10
+
+        async def scenario():
+            with (
+                mock.patch.object(
+                    self.hermes_module.aiohttp,
+                    "ClientSession",
+                    FakeSession,
+                ),
+                mock.patch.object(
+                    self.hermes_module.aiohttp,
+                    "ClientTimeout",
+                    lambda **_kwargs: object(),
+                ),
+            ):
+                return await self.hermes._request_chat_completion(
+                    "问题"
+                )
+
+        self.assertEqual("回退回答", asyncio.run(scenario()))
+        self.assertEqual(
+            "session-fallback",
+            self.hermes._hermes_session_ids[
+                self.hermes._session_key
+            ],
+        )
 
     def test_hermes_reads_only_its_own_configuration(self):
         config = _Config(
