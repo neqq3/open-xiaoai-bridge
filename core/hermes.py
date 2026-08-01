@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 import inspect
 from typing import Any
+import uuid
 
 import aiohttp
 import open_xiaoai_server
@@ -153,6 +154,13 @@ class HermesManager(OpenAIManager):
         """Start one wake-up conversation without replaying an older turn."""
 
         cls.reset_session()
+        # Hermes derives a deterministic transcript ID from the first user
+        # message when this header is omitted.  Common voice openers such as
+        # "我要睡觉了" would therefore reopen an older transcript.  Always
+        # provide a caller-generated ID so every wake-up starts truly fresh.
+        cls._hermes_session_ids[cls._session_key] = (
+            f"bridge-voice-{uuid.uuid4().hex}"
+        )
         logger.info(
             "Started a fresh voice conversation",
             module="Hermes",

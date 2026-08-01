@@ -82,7 +82,7 @@ class HermesBackendTest(unittest.TestCase):
             self.hermes._headers()["X-Hermes-Session-Id"],
         )
 
-    def test_new_conversation_discards_old_text_and_native_session(self):
+    def test_new_conversation_discards_old_text_and_rotates_native_session(self):
         self.hermes._session_key = "agent:hermes:speaker"
         self.hermes._sessions[self.hermes._session_key] = [
             {"role": "assistant", "content": "昨天已经播放"}
@@ -91,15 +91,24 @@ class HermesBackendTest(unittest.TestCase):
             "session-yesterday"
         )
 
-        self.hermes.begin_conversation()
+        with mock.patch.object(
+            self.hermes_module.uuid,
+            "uuid4",
+            return_value=mock.Mock(hex="a" * 32),
+        ):
+            self.hermes.begin_conversation()
 
         self.assertNotIn(
             self.hermes._session_key,
             self.hermes._sessions,
         )
-        self.assertNotIn(
-            self.hermes._session_key,
-            self.hermes._hermes_session_ids,
+        self.assertEqual(
+            "bridge-voice-" + "a" * 32,
+            self.hermes._hermes_session_ids[self.hermes._session_key],
+        )
+        self.assertEqual(
+            "bridge-voice-" + "a" * 32,
+            self.hermes._headers()["X-Hermes-Session-Id"],
         )
 
     def test_non_streaming_response_captures_native_session_id(self):
