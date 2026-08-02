@@ -19,11 +19,6 @@ class HermesConversationController(StreamingConversationController):
     MANAGER = HermesManager
     STREAMING_DEFAULT = True
 
-    async def start(self):
-        if not self.active:
-            self.backend.begin_conversation()
-        await super().start()
-
     def _progress_config(self):
         value = self._cfg("progress", {})
         return value if isinstance(value, dict) else {}

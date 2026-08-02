@@ -58,7 +58,7 @@ class HermesStreamingTest(unittest.TestCase):
         self.controller._stop_recording = mock.AsyncMock()
         self.controller._play_send_sound = mock.AsyncMock()
 
-    def test_start_opens_fresh_hermes_conversation(self):
+    def test_start_does_not_rotate_hermes_conversation(self):
         self.controller.active = False
         self.controller.backend = types.SimpleNamespace(
             begin_conversation=mock.Mock()
@@ -75,7 +75,7 @@ class HermesStreamingTest(unittest.TestCase):
 
         parent_start = asyncio.run(scenario())
 
-        self.controller.backend.begin_conversation.assert_called_once_with()
+        self.controller.backend.begin_conversation.assert_not_called()
         parent_start.assert_awaited_once_with()
 
     def test_final_sentence_starts_before_stream_finishes(self):
