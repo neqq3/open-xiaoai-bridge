@@ -435,7 +435,7 @@ async def before_wakeup(speaker, text, source, app):
         return "hermes"
 ```
 
-Hermes 后端会解析 `hermes.tool.progress` 结构化事件，但只播报预定义的自然语言状态，不朗读工具名、参数、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
+Hermes 后端会利用官方 `hermes.tool.progress` 结构化事件，为内置工具生成简短的语音进度提示；未知或 custom 工具使用通用提示，不朗读工具参数、标签、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
 
 `response_mode="streaming"` 是默认模式，使用 SSE 流式响应、按句提前播放和 Hermes tool progress，以降低首句等待时间。`response_mode="complete"` 会等待完整回答后一次性播放，使用更简单的交付路径，不支持 SSE tool progress，适合排查流式播放兼容性问题或希望使用简单播放行为的场景。两种模式都由用户显式选择；complete 不是 streaming 失败后的自动 fallback，Bridge 不会在一次请求失败后切换模式重新执行 Agent turn。
 

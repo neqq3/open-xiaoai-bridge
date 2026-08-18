@@ -211,7 +211,7 @@ class HermesStreamingTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            ["正在查最新资料", "这是最终答案。"],
+            ["正在查找相关资料", "这是最终答案。"],
             played,
         )
         self.assertNotIn("web_search", "".join(played))
@@ -681,7 +681,9 @@ class HermesStreamingTest(unittest.TestCase):
             return played, progress_cancelled.is_set()
 
         played, progress_cancelled = asyncio.run(scenario())
-        self.assertEqual(["正在查最新资料"], played)
+        # 这个受控竞态在 tool event 到达前先触发 long-wait，
+        # 因而只能使用“尚无真实工具事件”的通用提示。
+        self.assertEqual(["还在为你处理，请稍等"], played)
         self.assertTrue(progress_cancelled)
 
     def test_old_aborted_turn_cannot_speak_after_new_turn_starts(self):

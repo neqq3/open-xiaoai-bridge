@@ -314,6 +314,7 @@ class WakeupSessionManager:
             except Exception:
                 pass
 
+        # Stop OpenClaw continuous conversation (also stops its TTS stream)
         if self._openclaw_controller and self._openclaw_controller.is_active():
             self._openclaw_controller.stop()
         if self._openai_controller and self._openai_controller.is_active():

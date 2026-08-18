@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
-from typing import Any
 
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -68,128 +67,87 @@ class HermesToolProgress:
         return redacted[:500]
 
 
-@dataclass(frozen=True)
-class _ProgressCategory:
-    name: str
-    message: str
-    tool_terms: tuple[str, ...]
-    task_terms: tuple[str, ...] = ()
+# 与 Hermes agent/display.py 中 curated built-in _TOOL_VERBS 对应。
+# 这里只提供适合 TTS 的中文短句；custom/plugin/MCP 一律使用通用提示，
+# 并且绝不读取 argument preview 或 label，避免朗读机器参数和敏感内容。
+HERMES_TOOL_VOICE_STATUS = {
+    "web_search": "正在查找相关资料",
+    "web_extract": "正在读取相关内容",
+    "browser_navigate": "正在浏览相关页面",
+    "browser_click": "正在处理网页操作",
+    "browser_type": "正在处理网页内容",
+    "read_file": "正在读取文件",
+    "write_file": "正在处理文件",
+    "patch": "正在修改内容",
+    "search_files": "正在查找文件",
+    "terminal": "正在执行相关操作",
+    "execute_code": "正在运行程序",
+    "image_generate": "正在生成图片",
+    "video_generate": "正在生成视频",
+    "text_to_speech": "正在生成语音",
+    "vision_analyze": "正在查看图片",
+    "session_search": "正在回顾之前的内容",
+    "skill_view": "正在查看相关技能",
+    "skills_list": "正在查找可用技能",
+    "skill_manage": "正在更新相关技能",
+    "delegate_task": "正在处理子任务",
+    "cronjob": "正在安排任务",
+    "clarify": "正在确认你的需求",
+    "memory": "正在整理相关记忆",
+    "todo": "正在处理任务列表",
+}
 
-
-_CATEGORIES = (
-    _ProgressCategory(
-        "weather",
-        "正在查看天气，请稍等",
-        ("weather", "forecast", "meteorology"),
-        ("天气", "下雨", "带伞", "气温", "温度", "空气质量"),
-    ),
-    _ProgressCategory(
-        "music_service",
-        "正在连接音乐服务",
-        (
-            "music_login",
-            "music_connect",
-            "spotify_auth",
-            "netease_auth",
-        ),
-    ),
-    _ProgressCategory(
-        "music",
-        "正在帮你找这首歌",
-        (
-            "music",
-            "song",
-            "playlist",
-            "spotify",
-            "netease",
-            "youtube_music",
-        ),
-        ("歌曲", "这首歌", "音乐", "歌单", "播放"),
-    ),
-    _ProgressCategory(
-        "home",
-        "正在查看家里的设备状态",
-        (
-            "home_assistant",
-            "homeassistant",
-            "smart_home",
-            "hass",
-            "iot",
-            "device_state",
-        ),
-        ("家里的设备", "智能家居", "灯", "空调", "门锁", "传感器"),
-    ),
-    _ProgressCategory(
-        "lark",
-        "正在处理飞书里的内容",
-        ("lark", "feishu", "bitable"),
-        ("飞书", "多维表格", "妙记"),
-    ),
-    _ProgressCategory(
-        "calendar",
-        "正在查看日程",
-        ("calendar", "schedule", "agenda"),
-        ("日程", "行程", "会议", "安排"),
-    ),
-    _ProgressCategory(
-        "market",
-        "正在查看最新行情",
-        ("finance", "stock", "market", "price", "crypto", "quote"),
-        ("行情", "股价", "显卡价格", "价格走势", "汇率"),
-    ),
-    _ProgressCategory(
-        "research",
-        "正在查最新资料",
-        (
-            "web_search",
-            "web_extract",
-            "browser",
-            "search",
-            "fetch",
-            "wikipedia",
-            "news",
-        ),
-        ("最新", "查一下", "搜索", "资料", "新闻"),
-    ),
-    _ProgressCategory(
-        "memory",
-        "正在查找相关记录",
-        ("memory", "recall", "session_search"),
-        ("之前", "记得", "记录", "我说过"),
-    ),
-)
+_NO_TOOL_PROGRESS = "还在为你处理，请稍等"
+_UNKNOWN_TOOL_PROGRESS = "正在处理，请稍等"
+_COMPLETED_PROGRESS = "这一步已经完成，正在继续处理。"
 
 
 class HermesProgressNarrator:
-    """将 Hermes 事件归类为预定义的用户进度提示。"""
+    """将真实 Hermes 工具事件转换为 voice-safe 进度提示。"""
 
     def __init__(self, user_text: str):
-        self._user_text = str(user_text or "").lower()
-        self._latest_category = self._classify_task()
+        # 保留现有调用签名，但用户问题不再参与 progress 语义选择。
+        del user_text
+        self._latest_status: tuple[str, str] | None = None
+        self._received_tool_progress = False
         self._active_calls: dict[str, str] = {}
         self._announced: set[str] = set()
         self._completed_since_announcement = False
         self._organizing_announced = False
 
     def observe(self, event: HermesToolProgress):
-        category = self._classify_tool(
-            event.tool
-        ) or self._classify_task()
-        if category:
-            self._latest_category = category
-
+        self._received_tool_progress = True
+        tool = str(event.tool or "").strip().lower()
+        message = HERMES_TOOL_VOICE_STATUS.get(tool)
+        status_key = f"tool:{tool}" if message else "tool:unknown"
         call_key = event.tool_call_id or (
             f"{event.tool}:{event.status}"
         )
         if event.status == "running":
-            self._active_calls[call_key] = category or "working"
+            self._latest_status = (
+                message or _UNKNOWN_TOOL_PROGRESS,
+                status_key,
+            )
+            self._active_calls[call_key] = status_key
         elif event.status == "completed":
-            if self._active_calls.pop(call_key, None) is not None:
+            completed_key = self._active_calls.pop(call_key, None)
+            if completed_key is not None:
                 self._completed_since_announcement = True
+                if (
+                    self._latest_status
+                    and self._latest_status[1] == completed_key
+                ):
+                    self._latest_status = None
         elif event.status == "failed":
-            # 失败只结束对应调用，绝不能进入“已经找到信息”的成功汇总路径。
+            # 失败只结束对应调用，绝不能进入成功汇总路径。
             # Hermes 仍可继续执行其他工具并自行生成最终回答。
-            self._active_calls.pop(call_key, None)
+            failed_key = self._active_calls.pop(call_key, None)
+            if (
+                failed_key is not None
+                and self._latest_status
+                and self._latest_status[1] == failed_key
+            ):
+                self._latest_status = None
 
     def next_message(self) -> tuple[str, str] | None:
         """返回安全提示和用于语义去重的键。"""
@@ -201,43 +159,25 @@ class HermesProgressNarrator:
         ):
             self._completed_since_announcement = False
             self._organizing_announced = True
-            return "已经找到一些信息，正在整理", "organizing"
+            return _COMPLETED_PROGRESS, "organizing"
 
-        category = self._latest_category
-        if category and category not in self._announced:
-            self._announced.add(category)
-            return self._message_for(category), category
+        if self._latest_status:
+            message, key = self._latest_status
+            if key not in self._announced:
+                self._announced.add(key)
+                return message, key
 
         if not self._announced:
-            self._announced.add("working")
-            return "还在为你处理，请稍等", "working"
+            key = (
+                "tool:unknown"
+                if self._received_tool_progress
+                else "working"
+            )
+            self._announced.add(key)
+            return (
+                _UNKNOWN_TOOL_PROGRESS
+                if self._received_tool_progress
+                else _NO_TOOL_PROGRESS,
+                key,
+            )
         return None
-
-    def _classify_tool(self, tool: Any) -> str | None:
-        normalized = str(tool or "").strip().lower()
-        if not normalized:
-            return None
-        # 连接和鉴权类事件必须优先于宽泛的音乐关键词。
-        for category in _CATEGORIES:
-            if any(
-                term in normalized
-                for term in category.tool_terms
-            ):
-                return category.name
-        return None
-
-    def _classify_task(self) -> str | None:
-        for category in _CATEGORIES:
-            if any(
-                term in self._user_text
-                for term in category.task_terms
-            ):
-                return category.name
-        return None
-
-    @staticmethod
-    def _message_for(name: str) -> str:
-        for category in _CATEGORIES:
-            if category.name == name:
-                return category.message
-        return "还在为你处理，请稍等"
