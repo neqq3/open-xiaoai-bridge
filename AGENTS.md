@@ -175,7 +175,7 @@ Hermes 是独立后端，拥有自己的 `HERMES_ENABLE`、`hermes` 配置、Ses
 - `hermes.tool.progress` 只在 `hermes.py` / `hermes_progress.py` 中解释
 - `speech_queue.py` 使用单工作线程保证进度与最终回答不重叠、不乱序
 - 最终文本开始到达后丢弃尚未播放的进度；已经开始播放的进度不被粗暴打断
-- 流式请求在尚未播出最终句段时失败，才允许安全回退到非流式
+- 流式传输失败时不重新提交同一个 Agent turn；交付已收到的正文并提示用户重试
 - 小爱原生 TTS 使用完整播放标记检查、有限重试和长文本分段
 - 不在 Bridge 侧实现回答模式、模式切换命令或基于模型名/地址的 Hermes 猜测
 

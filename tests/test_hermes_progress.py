@@ -52,6 +52,82 @@ class HermesProgressNarratorTest(unittest.TestCase):
         )
         self.assertIsNone(narrator.next_message())
 
+    def test_running_then_failed_never_emits_success_summary(self):
+        narrator = HermesProgressNarrator("查一下最新资料")
+        running = HermesToolProgress(
+            tool="web_search",
+            status="running",
+            tool_call_id="call-1",
+        )
+        failed = HermesToolProgress(
+            tool="web_search",
+            status="failed",
+            tool_call_id="call-1",
+        )
+
+        narrator.observe(running)
+        self.assertEqual(
+            ("正在查最新资料", "research"),
+            narrator.next_message(),
+        )
+        narrator.observe(failed)
+        self.assertIsNone(narrator.next_message())
+
+    def test_completed_tool_can_summarize_when_another_tool_failed(self):
+        narrator = HermesProgressNarrator("查一下最新资料")
+        for call_id in ("failed-call", "completed-call"):
+            narrator.observe(
+                HermesToolProgress(
+                    tool="web_search",
+                    status="running",
+                    tool_call_id=call_id,
+                )
+            )
+        self.assertEqual(
+            ("正在查最新资料", "research"),
+            narrator.next_message(),
+        )
+
+        narrator.observe(
+            HermesToolProgress(
+                tool="web_search",
+                status="failed",
+                tool_call_id="failed-call",
+            )
+        )
+        self.assertIsNone(narrator.next_message())
+        narrator.observe(
+            HermesToolProgress(
+                tool="web_search",
+                status="completed",
+                tool_call_id="completed-call",
+            )
+        )
+        self.assertEqual(
+            ("已经找到一些信息，正在整理", "organizing"),
+            narrator.next_message(),
+        )
+
+    def test_repeated_failed_events_do_not_create_messages(self):
+        narrator = HermesProgressNarrator("查一下最新资料")
+        narrator.observe(
+            HermesToolProgress(
+                tool="web_search",
+                status="running",
+                tool_call_id="call-1",
+            )
+        )
+        narrator.next_message()
+
+        failed = HermesToolProgress(
+            tool="web_search",
+            status="failed",
+            tool_call_id="call-1",
+        )
+        for _ in range(3):
+            narrator.observe(failed)
+            self.assertIsNone(narrator.next_message())
+
     def test_technical_log_redacts_urls_and_secrets(self):
         event = HermesToolProgress(
             tool="web_search",

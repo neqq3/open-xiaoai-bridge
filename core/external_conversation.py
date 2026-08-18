@@ -244,10 +244,11 @@ class ExternalConversationController:
         )
         if response is None:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text="抱歉，我没有收到回复")
-            return "continue"
+            if not already_played:
+                speaker = get_speaker()
+                if speaker:
+                    await speaker.play(text="抱歉，我没有收到回复")
+                return "continue"
 
         # 5. Stop recording → TTS → Notify → Start recording → Wait for silence
         #    Mic is off during TTS and notify, so no echo is captured.
@@ -284,10 +285,11 @@ class ExternalConversationController:
         )
         if response is None:
             logger.warning(f"No response from {self.BACKEND_NAME}", module=self.LOG_MODULE)
-            speaker = get_speaker()
-            if speaker:
-                await speaker.play(text="抱歉，我没有收到回复")
-            return "continue"
+            if not already_played:
+                speaker = get_speaker()
+                if speaker:
+                    await speaker.play(text="抱歉，我没有收到回复")
+                return "continue"
 
         if not already_played:
             await self._stop_recording()

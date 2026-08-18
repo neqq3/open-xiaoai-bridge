@@ -247,12 +247,12 @@ class WakeupSessionManager:
         kws = get_kws()
         if kws:
             kws.pause()
+        controller = HermesConversationController()
+        task = asyncio.create_task(controller.start())
+        self._hermes_controller = controller
+        self._hermes_task = task
         try:
-            self._hermes_controller = HermesConversationController()
-            self._hermes_task = asyncio.create_task(
-                self._hermes_controller.start()
-            )
-            await self._hermes_task
+            await task
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -262,8 +262,11 @@ class WakeupSessionManager:
                 module="Wakeup",
             )
         finally:
-            self._hermes_controller = None
-            self._hermes_task = None
+            # 旧 wakeup 的 finally 不得清掉刚启动的新 Hermes 会话。
+            if self._hermes_controller is controller:
+                self._hermes_controller = None
+            if self._hermes_task is task:
+                self._hermes_task = None
             if kws:
                 kws.resume()
 
@@ -311,7 +314,6 @@ class WakeupSessionManager:
             except Exception:
                 pass
 
-        # Stop OpenClaw continuous conversation (also stops its TTS stream)
         if self._openclaw_controller and self._openclaw_controller.is_active():
             self._openclaw_controller.stop()
         if self._openai_controller and self._openai_controller.is_active():
@@ -320,6 +322,17 @@ class WakeupSessionManager:
             self._hermes_controller.stop()
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
+
+        # 新会话开始前必须等旧 Hermes worker/stream/progress 全部回收；
+        # 其他后端保持既有 reset 语义，不在本次修复中扩大行为变化。
+        hermes_task = self._hermes_task
+        if (
+            hermes_task
+            and not hermes_task.done()
+            and hermes_task is not asyncio.current_task()
+        ):
+            hermes_task.cancel()
+            await asyncio.gather(hermes_task, return_exceptions=True)
 
         # Stop all audio playback on the device
         await self._stop_device_playback()

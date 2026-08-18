@@ -113,6 +113,43 @@ class SequentialSpeechQueueRaceTest(unittest.TestCase):
         self.assertEqual("organizing", item.key)
         self.assertIsNone(end)
 
+    def test_abort_discards_all_queued_items_and_rejects_new_work(self):
+        async def scenario():
+            queue = SequentialSpeechQueue()
+            await queue.put_final("第一句")
+            first = await queue.get()
+            await queue.put_final("第二句")
+            await queue.put_final("第三句")
+
+            removed = await queue.abort()
+            repeated = await queue.abort()
+            rejected_final = await queue.put_final("第四句")
+            rejected_progress = await queue.put_progress(
+                "仍在处理",
+                key="working",
+            )
+            await queue.finish(first)
+            return (
+                removed,
+                repeated,
+                rejected_final,
+                rejected_progress,
+                queue.aborted,
+                await queue.get(),
+            )
+
+        result = asyncio.run(scenario())
+        self.assertEqual((2, 0, False, False, True, None), result)
+
+    def test_abort_drops_progress_before_worker_can_take_it(self):
+        async def scenario():
+            queue = SequentialSpeechQueue()
+            await queue.put_progress("正在处理", key="working")
+            removed = await queue.abort()
+            return removed, await queue.get()
+
+        self.assertEqual((1, None), asyncio.run(scenario()))
+
 
 if __name__ == "__main__":
     unittest.main()

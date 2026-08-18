@@ -183,10 +183,13 @@ class HermesProgressNarrator:
         )
         if event.status == "running":
             self._active_calls[call_key] = category or "working"
-        elif event.status in {"completed", "failed"}:
-            if call_key in self._active_calls:
-                self._active_calls.pop(call_key, None)
+        elif event.status == "completed":
+            if self._active_calls.pop(call_key, None) is not None:
                 self._completed_since_announcement = True
+        elif event.status == "failed":
+            # 失败只结束对应调用，绝不能进入“已经找到信息”的成功汇总路径。
+            # Hermes 仍可继续执行其他工具并自行生成最终回答。
+            self._active_calls.pop(call_key, None)
 
     def next_message(self) -> tuple[str, str] | None:
         """返回安全提示和用于语义去重的键。"""

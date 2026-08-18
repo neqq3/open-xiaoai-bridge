@@ -38,6 +38,9 @@ class HermesStreamingTest(unittest.TestCase):
 
         module = importlib.import_module("core.hermes_conversation")
         self.module = module
+        self.streaming_module = importlib.import_module(
+            "core.streaming_conversation"
+        )
         self.controller = module.HermesConversationController.__new__(
             module.HermesConversationController
         )
@@ -55,7 +58,11 @@ class HermesStreamingTest(unittest.TestCase):
             }
         )
         self.controller._playback_token = None
+        self.controller._vad_future = None
+        self.controller._xiaoai_asr_future = None
+        self.controller._loop = None
         self.controller._stop_recording = mock.AsyncMock()
+        self.controller._start_recording = mock.AsyncMock()
         self.controller._play_send_sound = mock.AsyncMock()
 
     def test_start_does_not_rotate_hermes_conversation(self):
@@ -77,6 +84,33 @@ class HermesStreamingTest(unittest.TestCase):
 
         self.controller.backend.begin_conversation.assert_not_called()
         parent_start.assert_awaited_once_with()
+
+    def test_interruption_notice_is_not_followed_by_generic_no_reply(self):
+        self.controller._wait_for_xiaoai_asr_text = mock.AsyncMock(
+            return_value="问题"
+        )
+        self.controller._request_backend_turn = mock.AsyncMock(
+            return_value=(None, True)
+        )
+        self.controller._play_notify = mock.AsyncMock()
+        speaker = mock.AsyncMock()
+
+        external_module = importlib.import_module(
+            "core.external_conversation"
+        )
+        with mock.patch.object(
+            external_module,
+            "get_speaker",
+            return_value=speaker,
+        ):
+            result = asyncio.run(
+                self.controller._run_one_turn_with_xiaoai_asr()
+            )
+
+        self.assertEqual("continue", result)
+        speaker.play.assert_not_awaited()
+        self.controller._play_notify.assert_awaited_once_with()
+        self.controller._start_recording.assert_awaited_once_with()
 
     def test_final_sentence_starts_before_stream_finishes(self):
         async def scenario():
@@ -183,7 +217,7 @@ class HermesStreamingTest(unittest.TestCase):
         self.assertNotIn("web_search", "".join(played))
         self.assertNotIn("http", "".join(played))
 
-    def test_failure_before_spoken_text_uses_non_streaming_fallback(self):
+    def test_failure_before_spoken_text_does_not_resubmit_turn(self):
         async def request(
             _text,
             *,
@@ -198,12 +232,12 @@ class HermesStreamingTest(unittest.TestCase):
             played,
             text,
         )
-        fallback = mock.AsyncMock(return_value="安全回退。")
+        resubmit = mock.AsyncMock(return_value="不应执行的第二次回答。")
         self.controller.backend = types.SimpleNamespace(
             _rule_prompt="",
             _session_key="agent:hermes:test",
             request_streaming_chat_completion=request,
-            _request_chat_completion=fallback,
+            _request_chat_completion=resubmit,
         )
 
         result = asyncio.run(
@@ -213,9 +247,9 @@ class HermesStreamingTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(("安全回退。", True), result)
-        self.assertEqual(["安全回退。"], played)
-        fallback.assert_awaited_once_with("问题")
+        self.assertEqual((None, True), result)
+        self.assertEqual(["回答传输中断了，请再问一次"], played)
+        resubmit.assert_not_awaited()
 
     def test_failure_after_spoken_text_does_not_replay_answer(self):
         async def request(
@@ -233,12 +267,12 @@ class HermesStreamingTest(unittest.TestCase):
             played,
             text,
         )
-        fallback = mock.AsyncMock(return_value="不应重复的完整回答。")
+        resubmit = mock.AsyncMock(return_value="不应重复的完整回答。")
         self.controller.backend = types.SimpleNamespace(
             _rule_prompt="",
             _session_key="agent:hermes:test",
             request_streaming_chat_completion=request,
-            _request_chat_completion=fallback,
+            _request_chat_completion=resubmit,
         )
 
         result = asyncio.run(
@@ -253,7 +287,488 @@ class HermesStreamingTest(unittest.TestCase):
             ["已经播出的第一句。", "回答传输中断了，请再问一次"],
             played,
         )
-        fallback.assert_not_awaited()
+        resubmit.assert_not_awaited()
+
+    def test_tool_progress_then_stream_failure_does_not_resubmit(self):
+        async def request(
+            _text,
+            *,
+            on_delta,
+            on_tool_progress,
+        ):
+            del on_delta
+            progress_module = importlib.import_module(
+                "core.hermes_progress"
+            )
+            await on_tool_progress(
+                progress_module.HermesToolProgress(
+                    tool="web_search",
+                    status="running",
+                    tool_call_id="call-1",
+                )
+            )
+            raise RuntimeError("connection lost after tool side effect")
+
+        played = []
+        self.controller._play_tts = lambda text: _append_async(
+            played,
+            text,
+        )
+        resubmit = mock.AsyncMock(return_value="不应执行")
+        self.controller.backend = types.SimpleNamespace(
+            _rule_prompt="",
+            _session_key="agent:hermes:test",
+            request_streaming_chat_completion=request,
+            _request_chat_completion=resubmit,
+        )
+
+        result = asyncio.run(
+            self.controller._request_streaming_turn(
+                "执行任务",
+                play_send_sound=False,
+            )
+        )
+
+        self.assertEqual((None, True), result)
+        self.assertEqual(["回答传输中断了，请再问一次"], played)
+        resubmit.assert_not_awaited()
+
+    def test_unfinished_delta_is_flushed_without_resubmitting(self):
+        async def request(
+            _text,
+            *,
+            on_delta,
+            on_tool_progress,
+        ):
+            del on_tool_progress
+            await on_delta("尚未成句的片段")
+            raise RuntimeError("connection lost")
+
+        played = []
+        self.controller._play_tts = lambda text: _append_async(
+            played,
+            text,
+        )
+        resubmit = mock.AsyncMock(return_value="不应执行")
+        self.controller.backend = types.SimpleNamespace(
+            _rule_prompt="",
+            _session_key="agent:hermes:test",
+            request_streaming_chat_completion=request,
+            _request_chat_completion=resubmit,
+        )
+
+        result = asyncio.run(
+            self.controller._request_streaming_turn(
+                "问题",
+                play_send_sound=False,
+            )
+        )
+
+        self.assertEqual(("尚未成句的片段", True), result)
+        self.assertEqual(
+            ["尚未成句的片段", "回答传输中断了，请再问一次"],
+            played,
+        )
+        resubmit.assert_not_awaited()
+
+    def test_abort_while_first_of_three_final_chunks_is_playing(self):
+        async def scenario():
+            first_started = asyncio.Event()
+            first_cancelled = asyncio.Event()
+            keep_stream_open = asyncio.Event()
+            played = []
+            speaker = mock.AsyncMock()
+
+            async def play(text):
+                played.append(text)
+                if len(played) == 1:
+                    first_started.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        first_cancelled.set()
+                        raise
+
+            async def request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_tool_progress
+                await on_delta("第一句已经就绪。第二句已经就绪。第三句已经就绪。")
+                await keep_stream_open.wait()
+                return "不应完成"
+
+            self.controller.active = True
+            self.controller._play_tts = play
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:test",
+                request_streaming_chat_completion=request,
+            )
+            baseline = set(asyncio.all_tasks())
+            with mock.patch.object(
+                self.streaming_module,
+                "get_speaker",
+                return_value=speaker,
+            ):
+                task = asyncio.create_task(
+                    self.controller._request_streaming_turn(
+                        "问题",
+                        play_send_sound=False,
+                    )
+                )
+                await first_started.wait()
+                self.controller.stop()
+                self.controller.stop()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                await asyncio.sleep(0)
+                leftovers = [
+                    item
+                    for item in asyncio.all_tasks() - baseline
+                    if not item.done()
+                ]
+            return played, first_cancelled.is_set(), leftovers, speaker
+
+        played, first_cancelled, leftovers, speaker = asyncio.run(scenario())
+        self.assertEqual(["第一句已经就绪。"], played)
+        self.assertTrue(first_cancelled)
+        self.assertEqual([], leftovers)
+        speaker.stop_device_audio.assert_awaited_once()
+        self.controller._start_recording.assert_awaited_once()
+
+    def test_abort_while_send_sound_blocks_reclaims_all_children(self):
+        async def scenario():
+            send_sound_started = asyncio.Event()
+            stream_started = asyncio.Event()
+            stream_cancelled = asyncio.Event()
+            speaker = mock.AsyncMock()
+
+            async def send_sound():
+                send_sound_started.set()
+                await asyncio.Future()
+
+            async def request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_delta, on_tool_progress
+                stream_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    stream_cancelled.set()
+                    raise
+
+            self.controller._play_send_sound = send_sound
+            self.controller._play_tts = mock.AsyncMock()
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:test",
+                request_streaming_chat_completion=request,
+            )
+            baseline = set(asyncio.all_tasks())
+            with mock.patch.object(
+                self.streaming_module,
+                "get_speaker",
+                return_value=speaker,
+            ):
+                task = asyncio.create_task(
+                    self.controller._request_streaming_turn(
+                        "问题",
+                        play_send_sound=True,
+                    )
+                )
+                await send_sound_started.wait()
+                await stream_started.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                await asyncio.sleep(0)
+                leftovers = [
+                    item
+                    for item in asyncio.all_tasks() - baseline
+                    if not item.done()
+                ]
+            return stream_cancelled.is_set(), leftovers, speaker
+
+        stream_cancelled, leftovers, speaker = asyncio.run(scenario())
+        self.assertTrue(stream_cancelled)
+        self.assertEqual([], leftovers)
+        speaker.stop_device_audio.assert_awaited_once()
+        self.controller._start_recording.assert_awaited_once()
+
+    def test_send_sound_exception_aborts_children_and_restores_recording(self):
+        async def scenario():
+            stream_cancelled = asyncio.Event()
+            speaker = mock.AsyncMock()
+
+            async def request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_delta, on_tool_progress
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    stream_cancelled.set()
+                    raise
+
+            self.controller._play_send_sound = mock.AsyncMock(
+                side_effect=RuntimeError("beep failed")
+            )
+            self.controller._play_tts = mock.AsyncMock()
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:test",
+                request_streaming_chat_completion=request,
+            )
+            baseline = set(asyncio.all_tasks())
+            with mock.patch.object(
+                self.streaming_module,
+                "get_speaker",
+                return_value=speaker,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "beep failed"):
+                    await self.controller._request_streaming_turn(
+                        "问题",
+                        play_send_sound=True,
+                    )
+                await asyncio.sleep(0)
+                leftovers = [
+                    item
+                    for item in asyncio.all_tasks() - baseline
+                    if not item.done()
+                ]
+            return stream_cancelled.is_set(), leftovers, speaker
+
+        stream_cancelled, leftovers, speaker = asyncio.run(scenario())
+        self.assertTrue(stream_cancelled)
+        self.assertEqual([], leftovers)
+        speaker.stop_device_audio.assert_awaited_once()
+        self.controller._start_recording.assert_awaited_once()
+
+    def test_abort_unfinished_delta_never_plays_it(self):
+        async def scenario():
+            delta_received = asyncio.Event()
+            speaker = mock.AsyncMock()
+            played = []
+
+            async def request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_tool_progress
+                await on_delta("短片段")
+                delta_received.set()
+                await asyncio.Future()
+
+            self.controller._play_tts = lambda text: _append_async(
+                played,
+                text,
+            )
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:test",
+                request_streaming_chat_completion=request,
+            )
+            with mock.patch.object(
+                self.streaming_module,
+                "get_speaker",
+                return_value=speaker,
+            ):
+                task = asyncio.create_task(
+                    self.controller._request_streaming_turn(
+                        "问题",
+                        play_send_sound=False,
+                    )
+                )
+                await delta_received.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            return played
+
+        self.assertEqual([], asyncio.run(scenario()))
+
+    def test_abort_progress_in_playback_never_continues_to_final(self):
+        async def scenario():
+            progress_started = asyncio.Event()
+            progress_cancelled = asyncio.Event()
+            speaker = mock.AsyncMock()
+            original_wait_for = asyncio.wait_for
+            initial_timeout_injected = False
+            played = []
+
+            async def controlled_wait_for(awaitable, timeout):
+                nonlocal initial_timeout_injected
+                if not initial_timeout_injected:
+                    initial_timeout_injected = True
+                    awaitable.close()
+                    raise asyncio.TimeoutError
+                return await original_wait_for(awaitable, timeout)
+
+            async def play(text):
+                played.append(text)
+                progress_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    progress_cancelled.set()
+                    raise
+
+            async def request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_delta
+                progress_module = importlib.import_module(
+                    "core.hermes_progress"
+                )
+                await on_tool_progress(
+                    progress_module.HermesToolProgress(
+                        tool="web_search",
+                        status="running",
+                        tool_call_id="call-1",
+                    )
+                )
+                await asyncio.Future()
+
+            self.controller.config.values["hermes"]["progress"] = {
+                "enabled": True,
+                "initial_delay": 1,
+                "min_interval": 20,
+                "max_messages": 1,
+            }
+            self.controller._play_tts = play
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:test",
+                request_streaming_chat_completion=request,
+            )
+            with (
+                mock.patch.object(
+                    self.streaming_module,
+                    "get_speaker",
+                    return_value=speaker,
+                ),
+                mock.patch.object(
+                    self.streaming_module.asyncio,
+                    "wait_for",
+                    side_effect=controlled_wait_for,
+                ),
+            ):
+                task = asyncio.create_task(
+                    self.controller._request_streaming_turn(
+                        "查资料",
+                        play_send_sound=False,
+                    )
+                )
+                await progress_started.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            return played, progress_cancelled.is_set()
+
+        played, progress_cancelled = asyncio.run(scenario())
+        self.assertEqual(["正在查最新资料"], played)
+        self.assertTrue(progress_cancelled)
+
+    def test_old_aborted_turn_cannot_speak_after_new_turn_starts(self):
+        async def scenario():
+            old_started = asyncio.Event()
+            speaker = mock.AsyncMock()
+            played = []
+
+            async def old_play(text):
+                played.append(("old", text))
+                old_started.set()
+                await asyncio.Future()
+
+            async def old_request(
+                _text,
+                *,
+                on_delta,
+                on_tool_progress,
+            ):
+                del on_tool_progress
+                await on_delta("旧会话第一句。旧会话第二句。")
+                await asyncio.Future()
+
+            self.controller._play_tts = old_play
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                _session_key="agent:hermes:old",
+                request_streaming_chat_completion=old_request,
+            )
+            with mock.patch.object(
+                self.streaming_module,
+                "get_speaker",
+                return_value=speaker,
+            ):
+                old_task = asyncio.create_task(
+                    self.controller._request_streaming_turn(
+                        "旧问题",
+                        play_send_sound=False,
+                    )
+                )
+                await old_started.wait()
+                old_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await old_task
+
+                new_controller = self.module.HermesConversationController.__new__(
+                    self.module.HermesConversationController
+                )
+                new_controller.config = self.controller.config
+                new_controller._playback_token = None
+                new_controller._stop_recording = mock.AsyncMock()
+                new_controller._start_recording = mock.AsyncMock()
+                new_controller._play_send_sound = mock.AsyncMock()
+                new_controller._play_tts = lambda text: _append_async(
+                    played,
+                    ("new", text),
+                )
+
+                async def new_request(
+                    _text,
+                    *,
+                    on_delta,
+                    on_tool_progress,
+                ):
+                    del on_tool_progress
+                    await on_delta("新会话回答。")
+                    return "新会话回答。"
+
+                new_controller.backend = types.SimpleNamespace(
+                    _rule_prompt="",
+                    _session_key="agent:hermes:new",
+                    request_streaming_chat_completion=new_request,
+                )
+                await new_controller._request_streaming_turn(
+                    "新问题",
+                    play_send_sound=False,
+                )
+                await asyncio.sleep(0)
+            return played
+
+        self.assertEqual(
+            [
+                ("old", "旧会话第一句。"),
+                ("new", "新会话回答。"),
+            ],
+            asyncio.run(scenario()),
+        )
 
     def test_mode_like_phrases_are_forwarded_unchanged(self):
         self.controller.config.values["hermes"]["streaming"] = {
