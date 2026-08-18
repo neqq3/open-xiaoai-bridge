@@ -51,9 +51,9 @@
 
 ### 📥 模型文件
 
-如果你启用小智 AI，或 OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `local_asr`，需要下载 `VAD + KWS + ASR` 模型文件。
+如果你启用小智 AI，或 OpenClaw / OpenAI 兼容服务 / Hermes / QwenPaw 连续对话使用 `local_asr`，需要下载 `VAD + KWS + ASR` 模型文件。
 
-如果 OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `xiaoai_asr`，只需要 `VAD + KWS`，不需要本地 ASR 模型。
+如果 OpenClaw / OpenAI 兼容服务 / Hermes / QwenPaw 连续对话使用 `xiaoai_asr`，只需要 `VAD + KWS`，不需要本地 ASR 模型。`local_asr` 使用 Bridge 本地 VAD/ASR 路径，`xiaoai_asr` 使用小爱原生 ASR；后者仍需要小爱设备和 Bridge 的相关能力正常。`HERMES_ENABLE=1` 时，Docker 的模型准备逻辑会按当前启动脚本参与对应的 KWS/ASR 准备，不代表会自动下载模型。
 
 1. 从 [releases](https://github.com/coderzc/open-xiaoai-bridge/releases/tag/vad-kws-asr-models) 下载模型压缩包
 2. 解压模型文件（路径见下方具体部署方式）
@@ -397,54 +397,89 @@ if "让小黑" in text:
 
 ## 🪽 Hermes 后端
 
-Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。设置 `HERMES_ENABLE=1` 启用；它有自己的配置、会话历史、生命周期和唤醒路由，不会改变 `OPENAI_ENABLE` 的行为。
+Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。它需要一个已经运行的 Hermes API Server；`open-xiaoai-bridge` 不会自动启动该服务。先确保 Bridge 所在进程或容器能够访问 Hermes，再启用入口。
 
-`config.py` 示例：
+### 最小部署
+
+在 `docker-compose.yml` 的 `open-xiaoai-bridge.environment` 中取消注释并启用：
+
+```yaml
+- HERMES_ENABLE=1
+```
+
+然后在 `config.py` 的 `hermes` 中至少填写：
 
 ```python
 "hermes": {
-    "base_url": "http://127.0.0.1:8642/v1",
+    "base_url": "http://192.168.x.x:8642/v1",
     "api_key": "",
     "model": "hermes-agent",
-    "profile": "",  # 可选：Hermes 官方 multi-profile 名称
-    "profile_api_keys": {},  # 命名 profile 各自的 API_SERVER_KEY
-    "input_mode": "local_asr",  # 或 "xiaoai_asr"
-    "session_key": "agent:default:open-xiaoai-bridge",
-    "session_header": "X-Hermes-Session-Key",
-    "response_mode": "streaming",  # streaming（默认）或 complete
-    "streaming": {
-        "sentence_min_chars": 24,
-        "sentence_max_chars": 160,
-    },
-    "progress": {
-        "enabled": True,
-        "initial_delay": 8,
-        "min_interval": 20,
-        "max_messages": 2,
-    },
-    "tts_speaker": "xiaoai",
 }
 ```
 
-默认示例会将“你好赫尔墨斯”和“召唤赫尔墨斯”路由到 `"hermes"`。也可以在 `before_wakeup` 中自行返回：
+`base_url` 通常填写到 `/v1`。也可以使用同一 Docker 网络中的服务名，例如 `http://hermes:8642/v1`。地址必须是 **Bridge 容器/进程能够访问的地址**；在 Docker 中，`127.0.0.1` 指向 Bridge 容器自身，只有 Hermes API Server 与 Bridge 处于同一网络命名空间时才适用。Bridge 只负责调用 API，不负责启动 Hermes Agent。
+
+配置后按项目原有方式启动：
+
+```bash
+docker compose up -d
+```
+
+### 唤醒与开始对话
+
+Hermes 不创建新的唤醒系统，仍使用 `APP_CONFIG["wakeup"]["keywords"]` 和 `before_wakeup(...)`。在路由函数中返回 `"hermes"` 即可进入 Hermes 连续对话：
 
 ```python
 async def before_wakeup(speaker, text, source, app):
     if source == "kws" and "你好赫尔墨斯" in text:
         await speaker.play(text="赫尔墨斯来了")
         return "hermes"
+    if source == "xiaoai" and text == "召唤赫尔墨斯":
+        await speaker.abort_xiaoai()
+        return "hermes"
 ```
 
-Hermes 后端会利用官方 `hermes.tool.progress` 结构化事件，为内置工具生成简短的语音进度提示；未知或 custom 工具使用通用提示，不朗读工具参数、标签、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
+“你好赫尔墨斯”只是当前配置中的示例 KWS，可自由修改；“召唤赫尔墨斯”是小爱原生唤醒后识别到的指令示例，不是新的系统唤醒词；“小爱同学”仍由小米设备负责。通用路由返回值还包括 `"openclaw"`、`"openai"`、`"qwenpaw"`、`"xiaozhi"` 和 `None`。
 
-`response_mode="streaming"` 是默认模式，使用 SSE 流式响应、按句提前播放和 Hermes tool progress，以降低首句等待时间。`response_mode="complete"` 会等待完整回答后一次性播放，使用更简单的交付路径，不支持 SSE tool progress，适合排查流式播放兼容性问题或希望使用简单播放行为的场景。两种模式都由用户显式选择；complete 不是 streaming 失败后的自动 fallback，Bridge 不会在一次请求失败后切换模式重新执行 Agent turn。
+退出连续 Hermes 会话时，默认的 `exit_keywords`（`退出`、`停止`、`再见`）会结束 Hermes 对话，随后按现有 `after_wakeup` 配置处理。重新唤醒“小爱同学”时，Bridge 会停止当前 Hermes controller 和播放并回到正常小爱流程。
 
-流式传输中断时，Bridge 会保留并播出已经收到的正文，再提示用户重新提问；不会把同一个 Agent turn 自动改成非流式重新提交，以免工具副作用或整段回答被重复执行。
+### 输入模式
 
-### Hermes Agent 主动播报
+`input_mode="local_asr"`（默认）使用 Bridge 本地 VAD + SherpaASR，需要准备本地 ASR 模型；`input_mode="xiaoai_asr"` 使用小爱原生 ASR，不需要本地 ASR 模型，但仍需要现有小爱设备/Bridge 能力正常。
 
-仓库已有的 `skills/xiaoai-tts/` 同时兼容 Hermes Agent Skill 格式，直接复用
-Bridge 的 `/api/play/text` 和 `/api/tts/doubao`，不会建立第二套播放服务：
+### streaming 与 complete
+
+`response_mode="streaming"` 是默认模式：使用 SSE，按句提前播放，并处理 Hermes `hermes.tool.progress`，可降低首句等待时间。`response_mode="complete"` 等待完整回答后一次性播放，不使用 SSE tool progress，交付路径更简单。两种模式都是显式用户选择；streaming 失败不会自动切换到 complete，也不会重新执行同一个 Agent turn。
+
+流式中断时，Bridge 会保留并播放已经收到的正文，再提示用户重新提问，避免工具副作用或整段回答被重复执行。
+
+### Prompt
+
+以下字段默认都可以留空：
+
+- `system_prompt`：发送给 Hermes 的系统级提示。
+- `rule_prompt`：自动播放/连续对话时追加的输出规则。
+- `rule_prompt_for_skill`：不自动播放、由 Agent 决定调用 Skill 时追加的规则。
+
+不要把私人 prompt 写入仓库示例；需要个性化时直接编辑部署环境中的 `config.py`。
+
+### TTS
+
+`tts_speaker="xiaoai"` 使用小爱原生 TTS。填写项目支持的 Doubao 音色 ID 时，使用现有 Doubao TTS 路径；`tts_speed` 仅在当前支持该参数的 provider（目前为 Doubao 路径）上生效。`session_tts_speakers` 是高级配置，可按 Session 覆盖音色。
+
+### Session 与 Profile
+
+默认情况下，同一个 `session_key` 会复用本地 history，并继续使用 Hermes 返回的 native `Session-Id`；重新唤醒 Hermes 不会自动生成一场全新的逻辑对话，用户无需手工填写 `Session-Id`。需要明确清理上下文时，调用 `reset_hermes_session()`，它会同时清理 Bridge history 和对应 native Session-Id。高级控制 API 还有 `set_hermes_session_key(...)`、`get_hermes_session_state()`；`session_header` 只是用于发送 Session-Key 的高级协议配置。
+
+Profile 是可选高级能力，普通聊天保持 `profile=""` 即可，不需要配置 `profile_api_keys`。设置命名 Profile 时，Bridge 会按 Hermes 官方 `/p/<profile>/v1/...` 形式自动构造 URL，因此 `base_url` 仍填写基础 `/v1` 地址，不要手工把 `/p/<profile>/v1` 写进去。不同 Profile 会隔离对应的 Session/history；命名 Profile 可在 `profile_api_keys` 中配置独立 API key。Profile 不是 OpenClaw agent ID。
+
+### Tool progress
+
+streaming 模式会使用真实的 `hermes.tool.progress` 事件。已知 Hermes built-in tool 会转换为简短、适合 TTS 的进度；unknown、custom、plugin 或 MCP 工具使用通用提示；没有真实 tool event 时，长时间等待使用通用等待提示。Bridge 不会根据用户问题里的“天气”“音乐”“飞书”等关键词猜测业务状态，也不会朗读 raw label、URL、文件路径、代码、参数或日志。最终正文优先于尚未开始的进度，已开始的语音按队列完成。
+
+### Hermes Agent 主动播报（可选高级能力）
+
+不安装 `xiaoai-tts` Skill，普通 Hermes request→response 聊天仍然正常。主动播报需要 Hermes 的 `xiaoai-tts` Skill 和 Bridge HTTP API；Compose 示例默认已启用 `API_SERVER_ENABLE=1`，本地运行时请按现有 API Server 配置启用。Skill 直接复用 `/api/play/text` 和 `/api/tts/doubao`，不会建立第二套播放服务：
 
 ```bash
 HERMES_ROOT="${HERMES_HOME:-$HOME/.hermes}"
@@ -452,21 +487,37 @@ cp -a skills/xiaoai-tts "$HERMES_ROOT/skills/xiaoai-tts"
 echo 'OPENXIAOAI_BASE_URL="http://bridge-host:9092"' >> "$HERMES_ROOT/.env"
 ```
 
-Hermes 加载 Skill 后，可以在定时任务或其他非语音触发的 Agent turn 中调用
-`${HERMES_SKILL_DIR}/tools/xiaoai-tts` 主动播报。工具只有在 Bridge 明确返回
-成功时才以退出码 `0` 结束；主动播报应使用 `--blocking`，并只在返回
-`RESULT success=true completed=true` 后声称已经播报。
+在 Skill 中使用 `${HERMES_SKILL_DIR}/tools/xiaoai-tts --blocking`，只有收到 `RESULT success=true completed=true` 才应声称播报成功。需要 Agent 自己决定何时播报时，调用 `app.send_to_hermes()`，并在部署配置的 `hermes.rule_prompt_for_skill` 中说明使用 `xiaoai-tts`；该路径不会自动播放 Hermes final，因此不会与主动播报重复。普通自动播放仍使用 `app.send_to_hermes_and_play_reply()`。
 
-需要由 Agent 决定是否播报时，调用 `app.send_to_hermes()`，并在部署配置的
-`hermes.rule_prompt_for_skill` 中说明应使用 `xiaoai-tts`；该入口不会自动播放
-Hermes 的 final，因此不会与 Skill 主动播报重复。需要普通 request→response
-自动播报时，仍使用 `app.send_to_hermes_and_play_reply()` 或 Hermes 连续对话。
+### 常用与高级配置
 
-Hermes 官方没有 `X-Agent-Id`。动态切换隔离的 Agent/人格/工作域时，应使用
-multi-profile 路由：在 `profile_api_keys` 中配置各 Profile 自己的
-`API_SERVER_KEY`，再调用 `app.set_hermes_profile("coder")`。切回默认 Profile
-使用 `app.set_hermes_profile(None)`。`session_key` 和 Profile 分别控制长期记忆
-作用域与运行环境，Bridge 会分别隔离它们的历史和原生 Session-Id。
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `base_url` | `http://127.0.0.1:8642/v1` | Hermes API Server 基础地址，通常到 `/v1` |
+| `api_key` | `""` | API 认证密钥 |
+| `model` | `"hermes-agent"` | 请求的模型名 |
+| `profile` | `""` | 可选 Hermes Profile，空值使用默认 Profile |
+| `profile_api_keys` | `{}` | 命名 Profile 的独立 API key |
+| `input_mode` | `"local_asr"` | `local_asr` 或 `xiaoai_asr` |
+| `session_key` | `agent:default:open-xiaoai-bridge` | 本地与 Hermes 长期记忆作用域 |
+| `session_header` | `X-Hermes-Session-Key` | 发送 Session-Key 的请求头，可留空 |
+| `system_prompt` | `""` | 系统级提示 |
+| `temperature` | `0.7` | 采样温度 |
+| `max_tokens` | `512` | 最大输出 token 数 |
+| `history_max_messages` | `20` | 本地 history 保留的消息数 |
+| `response_timeout` | `120` | 单次响应超时时间（秒） |
+| `response_mode` | `"streaming"` | `streaming` 或 `complete` |
+| `streaming.*` | 见 config.py | 分句最小/最大字符数 |
+| `progress.*` | 见 config.py | 等待与工具进度播报参数 |
+| `tts_speed` | `1.0` | 当前支持的 TTS provider 的语速 |
+| `tts_speaker` | `"xiaoai"` | 小爱原生或 Doubao 音色 |
+| `session_tts_speakers` | `{}` | 按 Session 覆盖音色 |
+| `exit_keywords` | `退出/停止/再见` | 结束 Hermes 连续对话的词 |
+| `rule_prompt` | `""` | 自动播放/连续对话规则 |
+| `rule_prompt_for_skill` | `""` | Skill 主动播报场景规则 |
+| `extra_body` | `{}` | 追加到请求体的高级字段 |
+
+完整字段和默认值以当前 `config.py` 为准；普通用户只需配置最小示例，其他字段保持默认即可。
 
 ## 🐾 QwenPaw 集成
 
@@ -649,7 +700,7 @@ async def before_wakeup(speaker, text, source, app):
     # 返回 None → 交给小爱原生处理
 ```
 
-**返回值含义：** `"openclaw"` → OpenClaw 连续对话，`"openai"` → OpenAI 兼容服务连续对话，`"qwenpaw"` → QwenPaw 连续对话，`"xiaozhi"` → 小智 AI，`None` → 不处理（用户可自行调用 `app.send_to_openclaw()` / `app.send_to_openai()` / `app.send_to_qwenpaw()` 等方法）
+**返回值含义：** `"openclaw"` → OpenClaw 连续对话，`"openai"` → OpenAI 兼容服务连续对话，`"hermes"` → Hermes 连续对话，`"qwenpaw"` → QwenPaw 连续对话，`"xiaozhi"` → 小智 AI，`None` → 不处理（用户可自行调用 `app.send_to_openclaw()` / `app.send_to_openai()` / `app.send_to_hermes()` / `app.send_to_qwenpaw()` 等方法）
 
 ### 🧠 多 Agent 路由 — 一个唤醒词，一个专属 Agent
 

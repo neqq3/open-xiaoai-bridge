@@ -351,11 +351,13 @@ APP_CONFIG = {
     # Hermes Agent API Server 专用配置
     # 独立于普通 OpenAI-compatible 后端启用和管理。
     "hermes": {
+        # Hermes API Server 地址，通常填写到 /v1；Docker 中 127.0.0.1 指向本容器。
         "base_url": "http://127.0.0.1:8642/v1",
         "api_key": "",
         "model": "hermes-agent",
         # 可选：Hermes 官方 multi-profile 路由。空值表示 default profile。
-        # 命名 profile 会请求 /p/<profile>/v1/...，并必须配置自己的 API key。
+        # Bridge 会自动构造 /p/<profile>/v1/...，不要手工写入 base_url。
+        # 命名 profile 才需要配置自己的 API key。
         "profile": "",
         "profile_api_keys": {},
         # 输入模式：
@@ -387,9 +389,9 @@ APP_CONFIG = {
         "tts_speaker": "xiaoai",
         "session_tts_speakers": {},
         "exit_keywords": ["退出", "停止", "再见"],
-        # 可选：为自动播放/连续对话追加通用规则。
+        # 可选：为自动播放/连续对话追加通用规则；默认留空。
         "rule_prompt": "",
-        # 可选：为 fire-and-forget / skill 场景追加通用规则。
+        # 可选：为 fire-and-forget / skill 场景追加通用规则；默认留空。
         "rule_prompt_for_skill": "",
         "extra_body": {},
     },
