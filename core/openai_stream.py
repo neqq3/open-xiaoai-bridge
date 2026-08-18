@@ -156,7 +156,12 @@ async def stream_openai_chat_completion(
         raise OpenAIStreamError(f"{log_name} backend is disabled")
 
     session_key = manager._session_key
-    history = manager._sessions.setdefault(session_key, [])
+    scope_key = (
+        manager._conversation_scope_key(session_key)
+        if hasattr(manager, "_conversation_scope_key")
+        else session_key
+    )
+    history = manager._sessions.setdefault(scope_key, [])
     messages = manager._build_messages(history, text)
     payload: dict[str, Any] = {
         "model": manager._model,
@@ -220,7 +225,7 @@ async def stream_openai_chat_completion(
                 )
             manager._capture_response_headers(
                 response.headers,
-                session_key=session_key,
+                session_key=scope_key,
             )
 
             async for raw_chunk in response.content.iter_any():

@@ -11,7 +11,7 @@ import urllib.error
 
 def get_api_config():
     """获取 API 配置"""
-    base_url = os.environ.get("OPENXIAOAI_BASE_URL", "http://192.168.3.6:9092")
+    base_url = os.environ.get("OPENXIAOAI_BASE_URL", "http://127.0.0.1:9092")
     # 移除末尾的斜杠
     return base_url.rstrip("/")
 

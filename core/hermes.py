@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import inspect
+import re
 from typing import Any
 
 import aiohttp
@@ -28,6 +29,8 @@ class HermesManager(OpenAIManager):
     DEFAULT_MODEL = "hermes-agent"
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     DEFAULT_SESSION_HEADER = "X-Hermes-Session-Key"
+    CAPABILITIES_TIMEOUT = 2.0
+    _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
     SESSION_ID_HEADER = "X-Hermes-Session-Id"
 
     # Hermes 和普通 OpenAI 可同时启用，因此可变运行状态必须由子类独立持有。
@@ -50,8 +53,13 @@ class HermesManager(OpenAIManager):
     _tts_speed = 1.0
     _rule_prompt = ""
     _rule_prompt_for_skill = ""
+    _profile = ""
+    _profile_api_keys: dict[str, str] = {}
     _sessions: dict[str, list[dict[str, str]]] = {}
     _hermes_session_ids: dict[str, str] = {}
+    _capabilities_checked = False
+    _capabilities: dict[str, Any] | None = None
+    _capabilities_diagnostic: str | None = None
     _response_events: dict[str, asyncio.Future] = {}
     _response_texts: dict[str, str] = {}
     _response_tts_speakers: dict[str, str | None] = {}
@@ -125,6 +133,17 @@ class HermesManager(OpenAIManager):
         cls._rule_prompt_for_skill = str(
             config.get("rule_prompt_for_skill", "") or ""
         )
+        cls._profile_api_keys = (
+            {
+                str(key): str(value)
+                for key, value in config.get("profile_api_keys", {}).items()
+                if key and value
+            }
+            if isinstance(config.get("profile_api_keys", {}), dict)
+            else {}
+        )
+        configured_profile = str(config.get("profile", "") or "").strip()
+        cls._profile = cls._validate_profile(configured_profile)
 
         if cls._enabled:
             logger.info(
@@ -141,12 +160,71 @@ class HermesManager(OpenAIManager):
         cls._session_key = session_key
 
     @classmethod
+    def get_session_key(cls) -> str:
+        """Return the active Hermes long-term-memory scope key."""
+
+        return cls._session_key
+
+    @classmethod
+    def set_profile(cls, profile: str | None):
+        """Route subsequent requests through Hermes' native profile prefix."""
+
+        normalized = cls._validate_profile(profile)
+        if normalized and normalized != "default":
+            if normalized not in cls._profile_api_keys:
+                raise ValueError(
+                    f"No API key configured for Hermes profile {normalized!r}"
+                )
+        logger.info(
+            f"Hermes profile updated: {cls.get_profile()!r} -> "
+            f"{normalized or 'default'!r}",
+            module="Hermes",
+        )
+        cls._profile = normalized
+
+    @classmethod
+    def get_profile(cls) -> str:
+        return cls._profile or "default"
+
+    @classmethod
+    def get_session_state(cls) -> dict[str, Any]:
+        """Return lightweight, non-secret state for the active profile/session."""
+
+        scope_key = cls._conversation_scope_key()
+        return {
+            "profile": cls.get_profile(),
+            "session_key": cls._session_key,
+            "session_id": cls._hermes_session_ids.get(scope_key),
+            "history_messages": len(cls._sessions.get(scope_key, [])),
+        }
+
+    @classmethod
     def reset_session(cls, session_key: str | None = None):
         """Discard both Bridge text history and Hermes' native transcript."""
 
         target_session_key = session_key or cls._session_key
-        super().reset_session(target_session_key)
-        cls._hermes_session_ids.pop(target_session_key, None)
+        scope_key = cls._conversation_scope_key(target_session_key)
+        cls._sessions.pop(scope_key, None)
+        cls._hermes_session_ids.pop(scope_key, None)
+
+    @classmethod
+    def _validate_profile(cls, profile: str | None) -> str:
+        normalized = str(profile or "").strip()
+        if not normalized or normalized == "default":
+            return ""
+        if not cls._PROFILE_RE.fullmatch(normalized):
+            raise ValueError(
+                "Hermes profile must match "
+                "^[a-z0-9][a-z0-9_-]{0,63}$"
+            )
+        return normalized
+
+    @classmethod
+    def _conversation_scope_key(
+        cls,
+        session_key: str | None = None,
+    ) -> str:
+        return f"{cls.get_profile()}\x1f{session_key or cls._session_key}"
 
     @classmethod
     def _capture_response_headers(
@@ -168,18 +246,159 @@ class HermesManager(OpenAIManager):
 
     @classmethod
     def _headers(cls) -> dict[str, str]:
-        headers = super()._headers()
-        session_id = cls._hermes_session_ids.get(cls._session_key)
+        headers = {"Content-Type": "application/json"}
+        api_key = (
+            cls._profile_api_keys.get(cls._profile, "")
+            if cls._profile
+            else cls._api_key
+        )
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if cls._session_header and cls._session_key:
+            headers[cls._session_header] = cls._session_key
+        session_id = cls._hermes_session_ids.get(
+            cls._conversation_scope_key()
+        )
         if session_id:
             headers[cls.SESSION_ID_HEADER] = session_id
         return headers
+
+    @classmethod
+    def _profiled_base_url(cls) -> str:
+        if not cls._profile:
+            return cls._base_url
+
+        marker = "/v1"
+        marker_index = cls._base_url.find(marker)
+        if marker_index < 0:
+            return (
+                cls._base_url.rstrip("/")
+                + f"/p/{cls._profile}/v1"
+            )
+
+        prefix = cls._base_url[:marker_index].rstrip("/")
+        suffix = cls._base_url[marker_index:]
+        profile_marker = re.search(r"/p/[a-z0-9][a-z0-9_-]{0,63}$", prefix)
+        if profile_marker:
+            prefix = prefix[:profile_marker.start()]
+        return f"{prefix}/p/{cls._profile}{suffix}"
+
+    @classmethod
+    def _chat_completions_url(cls) -> str:
+        base_url = cls._profiled_base_url()
+        if base_url.endswith("/chat/completions"):
+            return base_url
+        return base_url.rstrip("/") + "/chat/completions"
+
+    @classmethod
+    def _capabilities_url(cls) -> str:
+        base_url = cls._profiled_base_url().rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.removesuffix("/chat/completions")
+        if base_url.endswith("/v1"):
+            return base_url + "/capabilities"
+        return base_url + "/v1/capabilities"
+
+    @classmethod
+    async def connect(cls) -> bool:
+        """Probe Hermes metadata once without making startup depend on it."""
+
+        if not cls._initialized:
+            cls.initialize_from_config()
+        if not cls._enabled:
+            return False
+        await cls._probe_capabilities_once()
+        return True
+
+    @classmethod
+    async def _probe_capabilities_once(cls) -> dict[str, Any] | None:
+        if cls._capabilities_checked:
+            return cls._capabilities
+        cls._capabilities_checked = True
+
+        headers = {
+            key: value
+            for key, value in cls._headers().items()
+            if key == "Authorization"
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=cls.CAPABILITIES_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    cls._capabilities_url(),
+                    headers=headers,
+                ) as response:
+                    if response.status == 404:
+                        cls._capabilities_diagnostic = "unsupported (HTTP 404)"
+                        logger.info(
+                            "Capabilities endpoint is unavailable; continuing "
+                            "with Chat Completions",
+                            module="Hermes",
+                        )
+                        return None
+                    if response.status >= 400:
+                        cls._capabilities_diagnostic = (
+                            f"HTTP {response.status}"
+                        )
+                        logger.warning(
+                            "Capabilities probe failed with "
+                            f"HTTP {response.status}; continuing with Chat Completions",
+                            module="Hermes",
+                        )
+                        return None
+                    body = await response.json(content_type=None)
+        except asyncio.TimeoutError:
+            cls._capabilities_diagnostic = "timeout"
+            logger.warning(
+                "Capabilities probe timed out; continuing with Chat Completions",
+                module="Hermes",
+            )
+            return None
+        except Exception as exc:
+            cls._capabilities_diagnostic = type(exc).__name__
+            logger.warning(
+                "Capabilities probe failed; continuing with Chat Completions: "
+                f"{type(exc).__name__}: {exc}",
+                module="Hermes",
+            )
+            return None
+
+        if not isinstance(body, dict) or (
+            body.get("object") != "hermes.api_server.capabilities"
+            or body.get("platform") != "hermes-agent"
+        ):
+            cls._capabilities_diagnostic = "malformed response"
+            logger.warning(
+                "Capabilities response is not a Hermes API capability object; "
+                "continuing with Chat Completions",
+                module="Hermes",
+            )
+            return None
+
+        cls._capabilities = body
+        cls._capabilities_diagnostic = "available"
+        endpoints = body.get("endpoints", {})
+        surfaces = sorted(endpoints) if isinstance(endpoints, dict) else []
+        logger.info(
+            "Hermes-aware endpoint detected; available surfaces: "
+            + (", ".join(surfaces) if surfaces else "not advertised"),
+            module="Hermes",
+        )
+        return body
+
+    @classmethod
+    def get_capabilities(cls) -> dict[str, Any] | None:
+        """Return discovered capabilities without triggering another request."""
+
+        return dict(cls._capabilities) if cls._capabilities else None
 
     @classmethod
     async def _request_chat_completion(cls, text: str) -> str | None:
         """Send a non-streaming turn while retaining Hermes session state."""
 
         session_key = cls._session_key
-        history = cls._sessions.setdefault(session_key, [])
+        scope_key = cls._conversation_scope_key(session_key)
+        history = cls._sessions.setdefault(scope_key, [])
         payload: dict[str, Any] = {
             "model": cls._model,
             "messages": cls._build_messages(history, text),
@@ -211,7 +430,7 @@ class HermesManager(OpenAIManager):
                     )
                 cls._capture_response_headers(
                     response.headers,
-                    session_key=session_key,
+                    session_key=scope_key,
                 )
 
         response_text = cls._extract_response_text(body)

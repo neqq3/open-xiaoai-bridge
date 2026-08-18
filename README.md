@@ -406,6 +406,8 @@ Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。设置 `HERM
     "base_url": "http://127.0.0.1:8642/v1",
     "api_key": "",
     "model": "hermes-agent",
+    "profile": "",  # 可选：Hermes 官方 multi-profile 名称
+    "profile_api_keys": {},  # 命名 profile 各自的 API_SERVER_KEY
     "input_mode": "local_asr",  # 或 "xiaoai_asr"
     "session_key": "agent:default:open-xiaoai-bridge",
     "session_header": "X-Hermes-Session-Key",
@@ -424,18 +426,45 @@ Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。设置 `HERM
 }
 ```
 
-默认示例会将“超人迪迦”和“召唤迪迦”直接路由到 `"hermes"`。也可以在 `before_wakeup` 中自行返回：
+默认示例会将“你好赫尔墨斯”和“召唤赫尔墨斯”路由到 `"hermes"`。也可以在 `before_wakeup` 中自行返回：
 
 ```python
 async def before_wakeup(speaker, text, source, app):
-    if source == "kws" and "超人迪迦" in text:
-        await speaker.play(text="迪迦来了")
+    if source == "kws" and "你好赫尔墨斯" in text:
+        await speaker.play(text="赫尔墨斯来了")
         return "hermes"
 ```
 
 Hermes 后端会解析 `hermes.tool.progress` 结构化事件，但只播报预定义的自然语言状态，不朗读工具名、参数、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
 
 若服务端不支持 SSE，且尚未播出任何最终句段，会自动回退到非流式请求。若流在最终回答已经开始播放后中断，则不会重新请求并重复整段答案。
+
+### Hermes Agent 主动播报
+
+仓库已有的 `skills/xiaoai-tts/` 同时兼容 Hermes Agent Skill 格式，直接复用
+Bridge 的 `/api/play/text` 和 `/api/tts/doubao`，不会建立第二套播放服务：
+
+```bash
+HERMES_ROOT="${HERMES_HOME:-$HOME/.hermes}"
+cp -a skills/xiaoai-tts "$HERMES_ROOT/skills/xiaoai-tts"
+echo 'OPENXIAOAI_BASE_URL="http://bridge-host:9092"' >> "$HERMES_ROOT/.env"
+```
+
+Hermes 加载 Skill 后，可以在定时任务或其他非语音触发的 Agent turn 中调用
+`${HERMES_SKILL_DIR}/tools/xiaoai-tts` 主动播报。工具只有在 Bridge 明确返回
+成功时才以退出码 `0` 结束；主动播报应使用 `--blocking`，并只在返回
+`RESULT success=true completed=true` 后声称已经播报。
+
+需要由 Agent 决定是否播报时，调用 `app.send_to_hermes()`，并在部署配置的
+`hermes.rule_prompt_for_skill` 中说明应使用 `xiaoai-tts`；该入口不会自动播放
+Hermes 的 final，因此不会与 Skill 主动播报重复。需要普通 request→response
+自动播报时，仍使用 `app.send_to_hermes_and_play_reply()` 或 Hermes 连续对话。
+
+Hermes 官方没有 `X-Agent-Id`。动态切换隔离的 Agent/人格/工作域时，应使用
+multi-profile 路由：在 `profile_api_keys` 中配置各 Profile 自己的
+`API_SERVER_KEY`，再调用 `app.set_hermes_profile("coder")`。切回默认 Profile
+使用 `app.set_hermes_profile(None)`。`session_key` 和 Profile 分别控制长期记忆
+作用域与运行环境，Bridge 会分别隔离它们的历史和原生 Session-Id。
 
 ## 🐾 QwenPaw 集成
 

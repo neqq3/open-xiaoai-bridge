@@ -560,6 +560,18 @@ class MainApp:
         """覆盖 Hermes 长期记忆使用的 Session Key。"""
         HermesManager.set_session_key(session_key)
 
+    def reset_hermes_session(self, session_key: str | None = None):
+        """清理 Hermes Bridge 历史与对应的原生 Session-Id。"""
+        HermesManager.reset_session(session_key)
+
+    def get_hermes_session_state(self) -> dict:
+        """读取当前 Hermes profile/session 的非敏感状态。"""
+        return HermesManager.get_session_state()
+
+    def set_hermes_profile(self, profile: str | None):
+        """通过 Hermes 官方 /p/<profile>/ 路由切换 Profile。"""
+        HermesManager.set_profile(profile)
+
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:
         """Send message to QwenPaw."""
         try:

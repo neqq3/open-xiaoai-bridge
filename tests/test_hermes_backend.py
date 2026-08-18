@@ -32,10 +32,9 @@ class _Config:
 class HermesBackendTest(unittest.TestCase):
     def setUp(self):
         sys.modules["open_xiaoai_server"] = types.SimpleNamespace()
-        sys.modules.setdefault(
-            "aiohttp",
-            types.SimpleNamespace(ClientSession=object, ClientTimeout=object),
-        )
+        if isinstance(sys.modules.get("aiohttp"), types.SimpleNamespace):
+            sys.modules.pop("aiohttp", None)
+        importlib.import_module("aiohttp")
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
         for name in ("core.openai", "core.hermes"):
@@ -49,6 +48,11 @@ class HermesBackendTest(unittest.TestCase):
         self.openai._sessions.clear()
         self.hermes._sessions.clear()
         self.hermes._hermes_session_ids.clear()
+        self.hermes._profile = ""
+        self.hermes._profile_api_keys = {}
+        self.hermes._capabilities_checked = False
+        self.hermes._capabilities = None
+        self.hermes._capabilities_diagnostic = None
 
     def test_openai_and_hermes_runtime_state_are_isolated(self):
         self.openai._session_key = "plain-openai"
@@ -71,10 +75,11 @@ class HermesBackendTest(unittest.TestCase):
 
     def test_hermes_native_session_id_is_reused_within_conversation(self):
         self.hermes._session_key = "agent:hermes:speaker"
+        scope_key = self.hermes._conversation_scope_key()
 
         self.hermes._capture_response_headers(
             {"X-Hermes-Session-Id": "session-123"},
-            session_key=self.hermes._session_key,
+            session_key=scope_key,
         )
 
         self.assertEqual(
@@ -84,21 +89,22 @@ class HermesBackendTest(unittest.TestCase):
 
     def test_explicit_reset_discards_text_and_native_session(self):
         self.hermes._session_key = "agent:hermes:speaker"
-        self.hermes._sessions[self.hermes._session_key] = [
+        scope_key = self.hermes._conversation_scope_key()
+        self.hermes._sessions[scope_key] = [
             {"role": "assistant", "content": "昨天已经播放"}
         ]
-        self.hermes._hermes_session_ids[self.hermes._session_key] = (
+        self.hermes._hermes_session_ids[scope_key] = (
             "session-yesterday"
         )
 
         self.hermes.reset_session()
 
         self.assertNotIn(
-            self.hermes._session_key,
+            scope_key,
             self.hermes._sessions,
         )
         self.assertNotIn(
-            self.hermes._session_key,
+            scope_key,
             self.hermes._hermes_session_ids,
         )
 
@@ -175,9 +181,90 @@ class HermesBackendTest(unittest.TestCase):
         self.assertEqual(
             "session-fallback",
             self.hermes._hermes_session_ids[
-                self.hermes._session_key
+                self.hermes._conversation_scope_key()
             ],
         )
+
+    def test_profiles_use_official_url_prefix_and_isolate_sessions(self):
+        self.hermes._base_url = "http://hermes.test/v1"
+        self.hermes._api_key = "default-key"
+        self.hermes._profile_api_keys = {"coder": "coder-key"}
+        self.hermes._session_key = "speaker"
+
+        default_scope = self.hermes._conversation_scope_key()
+        self.hermes._sessions[default_scope] = [{"role": "user", "content": "a"}]
+        self.hermes.set_profile("coder")
+        coder_scope = self.hermes._conversation_scope_key()
+
+        self.assertEqual(
+            "http://hermes.test/p/coder/v1/chat/completions",
+            self.hermes._chat_completions_url(),
+        )
+        self.assertEqual(
+            "Bearer coder-key",
+            self.hermes._headers()["Authorization"],
+        )
+        self.assertNotEqual(default_scope, coder_scope)
+        self.assertEqual([], self.hermes._sessions.get(coder_scope, []))
+
+    def test_named_profile_requires_its_own_api_key(self):
+        with self.assertRaisesRegex(ValueError, "No API key configured"):
+            self.hermes.set_profile("coder")
+
+    def test_main_app_exposes_session_controls(self):
+        from core import app as app_module
+
+        MainApp = app_module.MainApp
+        manager = app_module.HermesManager
+
+        with (
+            mock.patch.object(manager, "set_session_key") as set_key,
+            mock.patch.object(manager, "reset_session") as reset,
+            mock.patch.object(
+                manager,
+                "get_session_state",
+                return_value={"session_key": "speaker"},
+            ),
+            mock.patch.object(manager, "set_profile") as set_profile,
+        ):
+            MainApp.set_hermes_session_key(object(), "speaker")
+            MainApp.reset_hermes_session(object(), "speaker")
+            state = MainApp.get_hermes_session_state(object())
+            MainApp.set_hermes_profile(object(), "coder")
+
+        set_key.assert_called_once_with("speaker")
+        reset.assert_called_once_with("speaker")
+        set_profile.assert_called_once_with("coder")
+        self.assertEqual({"session_key": "speaker"}, state)
+
+    def test_agent_autonomous_path_does_not_auto_play_final(self):
+        from core import app as app_module
+
+        MainApp = app_module.MainApp
+        manager = app_module.HermesManager
+        manager._rule_prompt_for_skill = "Use xiaoai-tts when needed."
+        with (
+            mock.patch.object(
+                manager,
+                "send",
+                new=mock.AsyncMock(return_value="run-1"),
+            ) as send,
+            mock.patch.object(
+                manager,
+                "send_and_play_reply",
+                new=mock.AsyncMock(),
+            ) as send_and_play,
+        ):
+            result = asyncio.run(
+                MainApp.send_to_hermes(object(), "提醒我喝水")
+            )
+
+        self.assertEqual("run-1", result)
+        send.assert_awaited_once_with(
+            "提醒我喝水\nUse xiaoai-tts when needed.",
+            wait_response=False,
+        )
+        send_and_play.assert_not_awaited()
 
     def test_hermes_reads_only_its_own_configuration(self):
         config = _Config(
@@ -298,7 +385,7 @@ class HermesBackendTest(unittest.TestCase):
         kws_result = asyncio.run(
             config_module.before_wakeup(
                 speaker,
-                "超人迪迦",
+                "你好赫尔墨斯",
                 "kws",
                 app,
             )
@@ -306,7 +393,7 @@ class HermesBackendTest(unittest.TestCase):
         xiaoai_result = asyncio.run(
             config_module.before_wakeup(
                 speaker,
-                "召唤迪迦",
+                "召唤赫尔墨斯",
                 "xiaoai",
                 app,
             )

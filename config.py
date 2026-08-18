@@ -76,8 +76,8 @@ async def before_wakeup(speaker, text, source, app):
             await speaker.play(text="小黑来了")
             return "openai"
 
-        if "超人迪迦" in text:
-            await speaker.play(text="迪迦来了")
+        if "你好赫尔墨斯" in text:
+            await speaker.play(text="赫尔墨斯来了")
             return "hermes"
 
         if "小爪" in text:
@@ -105,7 +105,7 @@ async def before_wakeup(speaker, text, source, app):
             await speaker.abort_xiaoai()
             return "openai"  # OpenAI-compatible service continuous conversation
 
-        if text == "召唤迪迦":
+        if text == "召唤赫尔墨斯":
             await speaker.abort_xiaoai()
             return "hermes"  # Hermes Agent continuous conversation
 
@@ -134,9 +134,11 @@ async def before_wakeup(speaker, text, source, app):
             await app.send_to_openai_and_play_reply(text.replace("让小黑", ""))
             return None
 
-        if "让迪迦" in text:
+        if "让赫尔墨斯" in text:
             await speaker.abort_xiaoai()
-            await app.send_to_hermes_and_play_reply(text.replace("让迪迦", ""))
+            await app.send_to_hermes_and_play_reply(
+                text.replace("让赫尔墨斯", "")
+            )
             return None
 
         if "让小爪" in text:
@@ -177,7 +179,7 @@ async def after_wakeup(speaker, source=None, session_key=None):
     if source == "openai":
         await speaker.play(text="小黑，再见")
     if source == "hermes":
-        await speaker.play(text="迪迦，再见")
+        await speaker.play(text="赫尔墨斯，再见")
     if source == "qwenpaw":
         await speaker.play(text="小爪，再见")
     if source == "xiaozhi":
@@ -194,7 +196,7 @@ APP_CONFIG = {
             "龙虾你好",
             "你好小黑",
             "小黑你好",
-            "超人迪迦",
+            "你好赫尔墨斯",
             "你好小爪",
             "小爪你好",
         ],
@@ -256,7 +258,7 @@ APP_CONFIG = {
         "OTA_URL": "http://127.0.0.1:8003/xiaozhi/ota/",
         "WEBSOCKET_URL": "ws://127.0.0.1:8000/xiaozhi/v1/",
         "WEBSOCKET_ACCESS_TOKEN": "", #（可选）一般用不到这个值
-        "DEVICE_ID": "", #（可选）默认自动生成
+        "DEVICE_ID": "89:7a:dd:d1:5b:a4", #（可选）默认自动生成
         "VERIFICATION_CODE": "", # 首次登陆时，验证码会在这里更新
     },
     "xiaoai": {
@@ -352,6 +354,10 @@ APP_CONFIG = {
         "base_url": "http://127.0.0.1:8642/v1",
         "api_key": "",
         "model": "hermes-agent",
+        # 可选：Hermes 官方 multi-profile 路由。空值表示 default profile。
+        # 命名 profile 会请求 /p/<profile>/v1/...，并必须配置自己的 API key。
+        "profile": "",
+        "profile_api_keys": {},
         # 输入模式：
         #   - "local_asr": 使用本地 VAD + SherpaASR
         #   - "xiaoai_asr": 接管小爱原生 ASR 结果
@@ -380,8 +386,10 @@ APP_CONFIG = {
         "tts_speaker": "xiaoai",
         "session_tts_speakers": {},
         "exit_keywords": ["退出", "停止", "再见"],
-        "rule_prompt": "注意：将结果处理成适合语音朗读的纯文字，不要返回 Markdown、代码块、网址、文件路径、命令、工具日志或推理过程",
-        "rule_prompt_for_skill": "注意：这条消息来自小爱音箱，用户看不到文字回复，请返回适合直接朗读的纯文字",
+        # 可选：为自动播放/连续对话追加通用规则。
+        "rule_prompt": "",
+        # 可选：为 fire-and-forget / skill 场景追加通用规则。
+        "rule_prompt_for_skill": "",
         "extra_body": {},
     },
     # QwenPaw Configuration
