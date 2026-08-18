@@ -1,6 +1,5 @@
 import asyncio
 import os
-import time
 from typing import Literal
 
 import open_xiaoai_server
@@ -19,16 +18,6 @@ class CommandResult:
 
 class SpeakerManager:
     status: Literal["playing", "paused", "idle"] = "idle"
-    _NATIVE_TTS_SCRIPT_MARKER = "tts_play.sh]"
-    _NATIVE_TTS_COMPLETION_MARKER = "Audio playback completed successfully"
-    _NATIVE_TTS_MAX_CHARS = 180
-    _TTS_DIAGNOSTIC_LIMIT = 1200
-    _TTS_TEXT_LOG_MARKERS = (
-        "Script started with arguments:",
-        "Text to speech:",
-        "Final parameters - Text:",
-        " - Text:",
-    )
 
     def __init__(self):
         set_speaker(self)
@@ -97,155 +86,6 @@ class SpeakerManager:
 
         res = await self.run_shell(command, timeout=timeout)
         return '"code": 0' in res.stdout if res else False
-
-    async def play_verified_text(
-        self,
-        text: str,
-        *,
-        timeout: int = 10 * 60 * 1000,
-        attempts: int = 2,
-    ) -> bool:
-        """播放长原生 TTS，并检查完整性及执行有限重试。
-
-        该方法按需调用，不改变小爱、OpenAI、OpenClaw 和 QwenPaw 已有
-        ``play`` 路径的行为。
-        """
-
-        normalized = self._normalize_native_tts_text(text or "你好")
-        chunks = self._split_native_tts_text(normalized)
-        if len(chunks) > 1:
-            logger.info(
-                f"[Speaker] Verified native TTS split into "
-                f"{len(chunks)} chunks"
-            )
-
-        max_attempts = max(1, int(attempts))
-        for index, chunk in enumerate(chunks, start=1):
-            safe_chunk = self._protect_native_tts_option_prefix(chunk)
-            escaped_text = safe_chunk.replace("'", "'\\''")
-            command = f"/usr/sbin/tts_play.sh '{escaped_text}'"
-            completed = False
-            for attempt in range(1, max_attempts + 1):
-                started_at = time.monotonic()
-                result = await self.run_shell(command, timeout=timeout)
-                elapsed = time.monotonic() - started_at
-                if self._native_tts_completed(result):
-                    completed = True
-                    if attempt > 1:
-                        logger.info(
-                            "[Speaker] Verified native TTS retry completed "
-                            f"(part {index}/{len(chunks)})"
-                        )
-                    break
-
-                logger.warning(
-                    "[Speaker] Verified native TTS did not complete "
-                    f"(part {index}/{len(chunks)}, "
-                    f"attempt {attempt}/{max_attempts}): "
-                    f"exit_code={result.exit_code}, "
-                    f"elapsed={elapsed:.1f}s, "
-                    f"stdout={self._diagnostic_output(result.stdout)!r}, "
-                    f"stderr={self._diagnostic_output(result.stderr)!r}"
-                )
-                if attempt < max_attempts:
-                    await asyncio.sleep(0.5)
-            if not completed:
-                return False
-        return True
-
-    @classmethod
-    def _native_tts_completed(cls, result: CommandResult) -> bool:
-        """检查播放是否完整，同时兼容不输出完成标记的旧脚本。"""
-
-        if result.exit_code != 0:
-            return False
-        if (
-            cls._NATIVE_TTS_SCRIPT_MARKER in result.stdout
-            and cls._NATIVE_TTS_COMPLETION_MARKER not in result.stdout
-        ):
-            return False
-        return True
-
-    @classmethod
-    def _diagnostic_output(cls, output: str | None) -> str:
-        """脱敏朗读文本，并限制远程命令诊断信息长度。"""
-
-        redacted_lines = []
-        for line in (output or "").splitlines():
-            if any(
-                marker in line
-                for marker in cls._TTS_TEXT_LOG_MARKERS
-            ):
-                timestamp = line.split(" - ", 1)[0]
-                redacted_lines.append(
-                    f"{timestamp} - [TTS text omitted]"
-                )
-            else:
-                redacted_lines.append(line)
-        compact = " ".join("\n".join(redacted_lines).split())
-        if len(compact) <= cls._TTS_DIAGNOSTIC_LIMIT:
-            return compact
-        return compact[:cls._TTS_DIAGNOSTIC_LIMIT] + "…"
-
-    @staticmethod
-    def _normalize_native_tts_text(text: str) -> str:
-        """替换可能破坏设备 TTS 脚本的字符。"""
-
-        replacements = {
-            '"': "“",
-            "\\": "／",
-            "\r": " ",
-            "\n": " ",
-            "\t": " ",
-        }
-        normalized = "".join(
-            replacements.get(char, char)
-            for char in text
-            if ord(char) >= 32 or char in "\r\n\t"
-        )
-        return " ".join(normalized.split())
-
-    @staticmethod
-    def _protect_native_tts_option_prefix(text: str) -> str:
-        """避免片段开头的连字符被设备脚本误判为命令选项。"""
-
-        if text.startswith("-"):
-            return "－" + text[1:]
-        return text
-
-    @classmethod
-    def _split_native_tts_text(cls, text: str) -> list[str]:
-        """尽量沿自然标点拆分长语音文本。"""
-
-        remaining = text.strip()
-        chunks: list[str] = []
-        major_punctuation = "。！？!?；;"
-        minor_punctuation = "，,、：: "
-
-        while len(remaining) > cls._NATIVE_TTS_MAX_CHARS:
-            window = remaining[:cls._NATIVE_TTS_MAX_CHARS]
-            cut = max(
-                window.rfind(char)
-                for char in major_punctuation
-            )
-            if cut < cls._NATIVE_TTS_MAX_CHARS // 2:
-                cut = max(
-                    window.rfind(char)
-                    for char in minor_punctuation
-                )
-            if cut < cls._NATIVE_TTS_MAX_CHARS // 2:
-                cut = cls._NATIVE_TTS_MAX_CHARS
-            else:
-                cut += 1
-
-            chunk = remaining[:cut].strip()
-            if chunk:
-                chunks.append(chunk)
-            remaining = remaining[cut:].strip()
-
-        if remaining:
-            chunks.append(remaining)
-        return chunks or ["你好"]
 
     async def play_server_file(
         self,

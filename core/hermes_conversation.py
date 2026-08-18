@@ -6,7 +6,6 @@ import open_xiaoai_server
 
 from core.hermes import HermesManager
 from core.hermes_progress import HermesProgressNarrator
-from core.ref import get_speaker
 from core.streaming_conversation import StreamingConversationController
 from core.utils.logger import logger
 
@@ -114,14 +113,7 @@ class HermesConversationController(StreamingConversationController):
                 tts_speaker=self.backend.get_tts_speaker_for_session_key(),
                 playback_token=self._playback_token,
             )
-            if played:
-                return
-
-            speaker = get_speaker()
-            if not speaker or not await speaker.play(
-                text=text,
-                blocking=True,
-            ):
+            if not played:
                 raise RuntimeError("Hermes TTS playback did not complete")
         except Exception as exc:
             logger.error(

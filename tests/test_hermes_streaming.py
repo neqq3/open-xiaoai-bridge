@@ -965,7 +965,7 @@ class HermesStreamingTest(unittest.TestCase):
 
         self.assertEqual(["完整回答"], asyncio.run(scenario()))
 
-    def test_failed_verified_tts_uses_blocking_native_fallback(self):
+    def test_failed_tts_does_not_retry_native_playback(self):
         backend = types.SimpleNamespace(
             _play_response_with_tts=mock.AsyncMock(
                 return_value=False
@@ -974,26 +974,16 @@ class HermesStreamingTest(unittest.TestCase):
                 return_value="xiaoai"
             ),
         )
-        speaker = mock.AsyncMock()
-        speaker.play.return_value = True
         self.controller.backend = backend
 
         async def scenario():
-            with mock.patch.object(
-                self.module,
-                "get_speaker",
-                return_value=speaker,
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "did not complete",
             ):
-                await self.controller._play_tts(
-                    "兜底也必须完整播放"
-                )
+                await self.controller._play_tts("播放失败")
 
         asyncio.run(scenario())
-
-        speaker.play.assert_awaited_once_with(
-            text="兜底也必须完整播放",
-            blocking=True,
-        )
         self.assertIsNone(self.controller._playback_token)
 
 

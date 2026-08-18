@@ -511,7 +511,7 @@ class HermesManager(OpenAIManager):
         tts_speaker: str | None = None,
         playback_token: int | None = None,
     ) -> bool:
-        """通过带完整性检查的 TTS 播放 Hermes 回复。"""
+        """通过项目标准 Speaker/TTS 路径播放 Hermes 回复。"""
 
         from core.ref import get_speaker
 
@@ -528,7 +528,7 @@ class HermesManager(OpenAIManager):
                         module="Hermes",
                     )
                     return False
-                return await speaker.play_verified_text(text)
+                return bool(await speaker.play(text=text, blocking=True))
 
             from core.services.tts.doubao import DoubaoTTS
 
@@ -541,12 +541,12 @@ class HermesManager(OpenAIManager):
             if not app_id or not access_key:
                 logger.warning(
                     "Doubao TTS credentials not configured; "
-                    "using verified native TTS",
+                    "using native XiaoAI TTS",
                     module="Hermes",
                 )
                 speaker = get_speaker()
                 return (
-                    await speaker.play_verified_text(text)
+                    bool(await speaker.play(text=text, blocking=True))
                     if speaker
                     else False
                 )
@@ -593,7 +593,7 @@ class HermesManager(OpenAIManager):
             )
             speaker = get_speaker()
             return (
-                await speaker.play_verified_text(text)
+                bool(await speaker.play(text=text, blocking=True))
                 if speaker
                 else False
             )

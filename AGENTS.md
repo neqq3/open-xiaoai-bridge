@@ -176,7 +176,6 @@ Hermes 是独立后端，拥有自己的 `HERMES_ENABLE`、`hermes` 配置、Ses
 - `speech_queue.py` 使用单工作线程保证进度与最终回答不重叠、不乱序
 - 最终文本开始到达后丢弃尚未播放的进度；已经开始播放的进度不被粗暴打断
 - 流式传输失败时不重新提交同一个 Agent turn；交付已收到的正文并提示用户重试
-- 小爱原生 TTS 使用完整播放标记检查、有限重试和长文本分段
 - Bridge 仅按显式 `response_mode` 选择 streaming 或 complete，不根据模型名、地址或失败结果自动猜测和切换模式
 
 ### WakeupSessionManager (core/wakeup_session.py)
