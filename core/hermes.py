@@ -29,6 +29,8 @@ class HermesManager(OpenAIManager):
     DEFAULT_MODEL = "hermes-agent"
     DEFAULT_SESSION_KEY = "agent:default:open-xiaoai-bridge"
     DEFAULT_SESSION_HEADER = "X-Hermes-Session-Key"
+    DEFAULT_RESPONSE_MODE = "streaming"
+    RESPONSE_MODES = frozenset({"streaming", "complete"})
     CAPABILITIES_TIMEOUT = 2.0
     _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
     SESSION_ID_HEADER = "X-Hermes-Session-Id"
@@ -53,6 +55,7 @@ class HermesManager(OpenAIManager):
     _tts_speed = 1.0
     _rule_prompt = ""
     _rule_prompt_for_skill = ""
+    _response_mode = DEFAULT_RESPONSE_MODE
     _profile = ""
     _profile_api_keys: dict[str, str] = {}
     _sessions: dict[str, list[dict[str, str]]] = {}
@@ -133,6 +136,16 @@ class HermesManager(OpenAIManager):
         cls._rule_prompt_for_skill = str(
             config.get("rule_prompt_for_skill", "") or ""
         )
+        response_mode = str(
+            config.get("response_mode", cls.DEFAULT_RESPONSE_MODE) or ""
+        ).strip().lower()
+        if response_mode not in cls.RESPONSE_MODES:
+            logger.warning(
+                f"[Hermes] Unknown response_mode={response_mode!r}; "
+                f"using {cls.DEFAULT_RESPONSE_MODE!r}"
+            )
+            response_mode = cls.DEFAULT_RESPONSE_MODE
+        cls._response_mode = response_mode
         cls._profile_api_keys = (
             {
                 str(key): str(value)
@@ -148,8 +161,14 @@ class HermesManager(OpenAIManager):
         if cls._enabled:
             logger.info(
                 f"[Hermes] Enabled, base_url={cls._base_url}, "
-                f"model={cls._model}"
+                f"model={cls._model}, response_mode={cls._response_mode}"
             )
+
+    @classmethod
+    def get_response_mode(cls) -> str:
+        """Return the explicit final-response delivery mode."""
+
+        return cls._response_mode
 
     @classmethod
     def set_session_key(cls, session_key: str):

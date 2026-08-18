@@ -771,13 +771,11 @@ class HermesStreamingTest(unittest.TestCase):
         )
 
     def test_mode_like_phrases_are_forwarded_unchanged(self):
-        self.controller.config.values["hermes"]["streaming"] = {
-            "enabled": False
-        }
-        send = mock.AsyncMock(return_value="回答")
+        complete = mock.AsyncMock(return_value="回答")
         self.controller.backend = types.SimpleNamespace(
             _rule_prompt="",
-            send=send,
+            get_response_mode=lambda: "complete",
+            _request_chat_completion=complete,
         )
 
         result = asyncio.run(
@@ -788,10 +786,182 @@ class HermesStreamingTest(unittest.TestCase):
         )
 
         self.assertEqual(("回答", False), result)
-        send.assert_awaited_once_with(
-            "详细查一下，不要简单说",
-            wait_response=True,
+        complete.assert_awaited_once_with(
+            "详细查一下，不要简单说"
         )
+
+    def test_streaming_mode_uses_sse_and_never_calls_complete(self):
+        async def stream(
+            _text,
+            *,
+            on_delta,
+            on_tool_progress,
+        ):
+            del on_tool_progress
+            await on_delta("流式回答完成。")
+            return "流式回答完成。"
+
+        complete = mock.AsyncMock(return_value="不应调用")
+        played = []
+        self.controller._play_tts = lambda text: _append_async(
+            played,
+            text,
+        )
+        self.controller.backend = types.SimpleNamespace(
+            _rule_prompt="",
+            _session_key="agent:hermes:test",
+            get_response_mode=lambda: "streaming",
+            request_streaming_chat_completion=stream,
+            _request_chat_completion=complete,
+        )
+
+        result = asyncio.run(
+            self.controller._request_backend_turn(
+                "问题",
+                play_send_sound=False,
+            )
+        )
+
+        self.assertEqual(("流式回答完成。", True), result)
+        self.assertEqual(["流式回答完成。"], played)
+        complete.assert_not_awaited()
+
+    def test_complete_mode_skips_stream_queue_and_plays_once(self):
+        complete = mock.AsyncMock(return_value="完整回答")
+        stream = mock.AsyncMock(return_value="不应调用")
+        self.controller.backend = types.SimpleNamespace(
+            _rule_prompt="",
+            get_response_mode=lambda: "complete",
+            _request_chat_completion=complete,
+            request_streaming_chat_completion=stream,
+        )
+        self.controller._wait_for_xiaoai_asr_text = mock.AsyncMock(
+            return_value="问题"
+        )
+        self.controller._play_tts = mock.AsyncMock()
+        self.controller._play_notify = mock.AsyncMock()
+
+        with mock.patch.object(
+            self.streaming_module,
+            "SequentialSpeechQueue",
+            side_effect=AssertionError("complete must not create queue"),
+        ):
+            result = asyncio.run(
+                self.controller._run_one_turn_with_xiaoai_asr()
+            )
+
+        self.assertEqual("continue", result)
+        complete.assert_awaited_once_with("问题")
+        stream.assert_not_awaited()
+        self.controller._play_tts.assert_awaited_once_with("完整回答")
+
+    def test_complete_failure_is_not_retried_as_streaming(self):
+        complete = mock.AsyncMock(
+            side_effect=RuntimeError("request failed")
+        )
+        stream = mock.AsyncMock(return_value="不应调用")
+        self.controller.backend = types.SimpleNamespace(
+            _rule_prompt="",
+            get_response_mode=lambda: "complete",
+            _request_chat_completion=complete,
+            request_streaming_chat_completion=stream,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "request failed"):
+            asyncio.run(
+                self.controller._request_backend_turn(
+                    "问题",
+                    play_send_sound=False,
+                )
+            )
+
+        complete.assert_awaited_once_with("问题")
+        stream.assert_not_awaited()
+
+    def test_complete_http_wait_is_cancelled_by_stop(self):
+        async def scenario():
+            request_started = asyncio.Event()
+            request_cancelled = asyncio.Event()
+
+            async def complete(_text):
+                request_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    request_cancelled.set()
+                    raise
+
+            self.controller.config.values["hermes"]["input_mode"] = (
+                "local_asr"
+            )
+            self.controller.active = True
+            self.controller._loop = asyncio.get_running_loop()
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="",
+                get_response_mode=lambda: "complete",
+                _request_chat_completion=complete,
+            )
+            turn = asyncio.create_task(
+                self.controller._request_backend_turn(
+                    "问题",
+                    play_send_sound=False,
+                )
+            )
+            await request_started.wait()
+            self.controller.stop()
+            with self.assertRaises(asyncio.CancelledError):
+                await turn
+            return request_cancelled.is_set()
+
+        self.assertTrue(asyncio.run(scenario()))
+
+    def test_complete_tts_playback_token_is_stopped_without_replay(self):
+        async def scenario():
+            playback_started = asyncio.Event()
+            release_playback = asyncio.Event()
+            calls = []
+
+            async def play_response(text, **_kwargs):
+                calls.append(text)
+                playback_started.set()
+                await release_playback.wait()
+                return True
+
+            self.controller.config.values["hermes"]["input_mode"] = (
+                "local_asr"
+            )
+            self.controller.active = True
+            self.controller._loop = asyncio.get_running_loop()
+            self.controller.backend = types.SimpleNamespace(
+                _play_response_with_tts=play_response,
+                get_tts_speaker_for_session_key=lambda: "xiaoai",
+            )
+            external_module = importlib.import_module(
+                "core.external_conversation"
+            )
+            with (
+                mock.patch.object(
+                    self.module.open_xiaoai_server,
+                    "begin_playback_session",
+                    return_value=73,
+                ),
+                mock.patch.object(
+                    external_module.open_xiaoai_server,
+                    "stop_tts_playback",
+                    create=True,
+                ) as stop_playback,
+            ):
+                playback = asyncio.create_task(
+                    self.controller._play_tts("完整回答")
+                )
+                await playback_started.wait()
+                self.controller.stop()
+                stop_playback.assert_called_once_with(73)
+                release_playback.set()
+                await playback
+            return calls
+
+        self.assertEqual(["完整回答"], asyncio.run(scenario()))
 
     def test_failed_verified_tts_uses_blocking_native_fallback(self):
         backend = types.SimpleNamespace(

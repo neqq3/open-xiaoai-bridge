@@ -50,6 +50,7 @@ class HermesBackendTest(unittest.TestCase):
         self.hermes._hermes_session_ids.clear()
         self.hermes._profile = ""
         self.hermes._profile_api_keys = {}
+        self.hermes._response_mode = self.hermes.DEFAULT_RESPONSE_MODE
         self.hermes._capabilities_checked = False
         self.hermes._capabilities = None
         self.hermes._capabilities_diagnostic = None
@@ -118,10 +119,12 @@ class HermesBackendTest(unittest.TestCase):
         self.assertNotIn("begin_conversation", controller_source)
         self.assertNotIn("bridge-voice-", source)
 
-    def test_non_streaming_response_captures_native_session_id(self):
+    def test_complete_response_uses_stream_false_and_captures_session(self):
+        posts = []
+
         class FakeResponse:
             status = 200
-            headers = {"X-Hermes-Session-Id": "session-fallback"}
+            headers = {"X-Hermes-Session-Id": "session-complete"}
 
             async def __aenter__(self):
                 return self
@@ -134,7 +137,7 @@ class HermesBackendTest(unittest.TestCase):
                     "choices": [
                         {
                             "message": {
-                                "content": "回退回答"
+                                "content": "完整回答"
                             }
                         }
                     ]
@@ -150,10 +153,11 @@ class HermesBackendTest(unittest.TestCase):
             async def __aexit__(self, *_args):
                 return False
 
-            def post(self, *_args, **_kwargs):
+            def post(self, *_args, **kwargs):
+                posts.append(kwargs)
                 return FakeResponse()
 
-        self.hermes._session_key = "agent:hermes:fallback"
+        self.hermes._session_key = "agent:hermes:complete"
         self.hermes._model = "hermes-agent"
         self.hermes._extra_body = {}
         self.hermes._temperature = None
@@ -177,10 +181,21 @@ class HermesBackendTest(unittest.TestCase):
                     "问题"
                 )
 
-        self.assertEqual("回退回答", asyncio.run(scenario()))
+        self.assertEqual("完整回答", asyncio.run(scenario()))
+        self.assertEqual(1, len(posts))
+        self.assertIs(False, posts[0]["json"]["stream"])
         self.assertEqual(
-            "session-fallback",
+            "session-complete",
             self.hermes._hermes_session_ids[
+                self.hermes._conversation_scope_key()
+            ],
+        )
+        self.assertEqual(
+            [
+                {"role": "user", "content": "问题"},
+                {"role": "assistant", "content": "完整回答"},
+            ],
+            self.hermes._sessions[
                 self.hermes._conversation_scope_key()
             ],
         )
@@ -242,6 +257,7 @@ class HermesBackendTest(unittest.TestCase):
 
         MainApp = app_module.MainApp
         manager = app_module.HermesManager
+        manager._response_mode = "complete"
         manager._rule_prompt_for_skill = "Use xiaoai-tts when needed."
         with (
             mock.patch.object(
@@ -301,6 +317,70 @@ class HermesBackendTest(unittest.TestCase):
         self.assertEqual("hermes-model", self.hermes._model)
         self.assertEqual("agent:hermes:test", self.hermes._session_key)
         self.assertEqual("X-Hermes-Session-Key", self.hermes._session_header)
+        self.assertEqual("streaming", self.hermes.get_response_mode())
+
+    def test_response_mode_is_normalized_and_invalid_value_warns(self):
+        config = _Config(
+            {"hermes": {"response_mode": "  COMPLETE  "}}
+        )
+        self.hermes._reload_listener_registered = False
+        with (
+            mock.patch.object(
+                self.hermes_module.ConfigManager,
+                "instance",
+                return_value=config,
+            ),
+            mock.patch.object(
+                self.hermes_module,
+                "get_env",
+                return_value="true",
+            ),
+        ):
+            self.hermes.reload_from_config()
+        self.assertEqual("complete", self.hermes.get_response_mode())
+
+        config.values["hermes"]["response_mode"] = "automatic"
+        with (
+            mock.patch.object(
+                self.hermes_module.ConfigManager,
+                "instance",
+                return_value=config,
+            ),
+            mock.patch.object(
+                self.hermes_module,
+                "get_env",
+                return_value="true",
+            ),
+            mock.patch.object(
+                self.hermes_module.logger,
+                "warning",
+            ) as warning,
+        ):
+            self.hermes.reload_from_config()
+        self.assertEqual("streaming", self.hermes.get_response_mode())
+        warning.assert_called_once()
+
+    def test_response_mode_does_not_change_session_scope_or_native_id(self):
+        self.hermes._session_key = "speaker"
+        self.hermes._profile = ""
+        scope_key = self.hermes._conversation_scope_key()
+        self.hermes._sessions[scope_key] = [
+            {"role": "assistant", "content": "已有上下文"}
+        ]
+        self.hermes._hermes_session_ids[scope_key] = "native-session"
+
+        self.hermes._response_mode = "streaming"
+        streaming_scope = self.hermes._conversation_scope_key()
+        self.hermes._response_mode = "complete"
+        complete_scope = self.hermes._conversation_scope_key()
+
+        self.assertEqual(scope_key, streaming_scope)
+        self.assertEqual(scope_key, complete_scope)
+        self.assertEqual(
+            "native-session",
+            self.hermes._headers()["X-Hermes-Session-Id"],
+        )
+        self.assertEqual(1, len(self.hermes._sessions[scope_key]))
 
     def test_main_app_adds_hermes_after_existing_backend_arguments(self):
         tree = ast.parse((ROOT / "core/app.py").read_text(encoding="utf-8"))
@@ -420,7 +500,8 @@ class HermesBackendTest(unittest.TestCase):
         )
         self.assertNotIn("streaming", openai_config)
         self.assertNotIn("progress", openai_config)
-        self.assertTrue(hermes_config["streaming"]["enabled"])
+        self.assertEqual("streaming", hermes_config["response_mode"])
+        self.assertNotIn("enabled", hermes_config["streaming"])
         self.assertTrue(hermes_config["progress"]["enabled"])
 
 

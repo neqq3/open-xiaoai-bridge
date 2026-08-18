@@ -369,9 +369,10 @@ APP_CONFIG = {
         "max_tokens": 512,
         "history_max_messages": 20,
         "response_timeout": 120,
-        # Hermes 专用流式回复。普通 OpenAI-compatible 后端仍保持非流式。
+        # 显式选择回答交付模式：streaming（默认）或 complete。
+        "response_mode": "streaming",
+        # streaming 模式的分句参数。
         "streaming": {
-            "enabled": True,
             "sentence_min_chars": 24,
             "sentence_max_chars": 160,
         },

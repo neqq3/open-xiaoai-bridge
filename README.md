@@ -411,8 +411,8 @@ Hermes 是独立于普通 OpenAI-compatible 入口的增强后端。设置 `HERM
     "input_mode": "local_asr",  # 或 "xiaoai_asr"
     "session_key": "agent:default:open-xiaoai-bridge",
     "session_header": "X-Hermes-Session-Key",
+    "response_mode": "streaming",  # streaming（默认）或 complete
     "streaming": {
-        "enabled": True,
         "sentence_min_chars": 24,
         "sentence_max_chars": 160,
     },
@@ -436,6 +436,8 @@ async def before_wakeup(speaker, text, source, app):
 ```
 
 Hermes 后端会解析 `hermes.tool.progress` 结构化事件，但只播报预定义的自然语言状态，不朗读工具名、参数、URL、路径或日志。短任务在 `initial_delay` 内完成时不会播报进度；最终答案到达后，尚未开始的进度会被丢弃，已经开始的语音则正常播放完毕，再按顺序播放最终答案。
+
+`response_mode="streaming"` 是默认模式，使用 SSE 流式响应、按句提前播放和 Hermes tool progress，以降低首句等待时间。`response_mode="complete"` 会等待完整回答后一次性播放，使用更简单的交付路径，不支持 SSE tool progress，适合排查流式播放兼容性问题或希望使用简单播放行为的场景。两种模式都由用户显式选择；complete 不是 streaming 失败后的自动 fallback，Bridge 不会在一次请求失败后切换模式重新执行 Agent turn。
 
 流式传输中断时，Bridge 会保留并播出已经收到的正文，再提示用户重新提问；不会把同一个 Agent turn 自动改成非流式重新提交，以免工具副作用或整段回答被重复执行。
 

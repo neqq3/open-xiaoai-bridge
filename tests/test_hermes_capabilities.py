@@ -133,6 +133,27 @@ class HermesCapabilitiesTest(unittest.TestCase):
         )
         self.assertEqual(body, self.hermes.get_capabilities())
 
+    def test_capabilities_probe_is_independent_of_response_mode(self):
+        body = {
+            "object": "hermes.api_server.capabilities",
+            "platform": "hermes-agent",
+            "endpoints": {},
+        }
+        for mode in ("streaming", "complete"):
+            with self.subTest(mode=mode):
+                self.hermes._response_mode = mode
+                self.hermes._capabilities_checked = False
+                self.hermes._capabilities = None
+                result, calls, _timeout = self._run_probe(
+                    _Response(200, body)
+                )
+                self.assertTrue(result)
+                self.assertEqual(1, len(calls))
+                self.assertEqual(
+                    "http://hermes.test/v1/capabilities",
+                    calls[0][1],
+                )
+
     def test_capabilities_404_is_non_blocking(self):
         result, _calls, _timeout = self._run_probe(_Response(404))
         self.assertTrue(result)

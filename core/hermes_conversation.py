@@ -1,5 +1,7 @@
 """Hermes Agent 连续对话控制器。"""
 
+import asyncio
+
 import open_xiaoai_server
 
 from core.hermes import HermesManager
@@ -18,6 +20,69 @@ class HermesConversationController(StreamingConversationController):
     WAKEUP_SOURCE = "hermes"
     MANAGER = HermesManager
     STREAMING_DEFAULT = True
+
+    def stop(self):
+        """停止连续对话，并取消 complete 模式正在等待的 HTTP 请求。"""
+
+        request_task = getattr(self, "_complete_request_task", None)
+        super().stop()
+        if request_task and not request_task.done():
+            request_task.get_loop().call_soon_threadsafe(
+                request_task.cancel
+            )
+
+    def _streaming_enabled(self) -> bool:
+        """response_mode 是唯一的响应交付模式选择。"""
+
+        return self.backend.get_response_mode() == "streaming"
+
+    async def _request_backend_turn(
+        self,
+        text: str,
+        *,
+        play_send_sound: bool,
+    ) -> tuple[str | None, bool]:
+        if self._streaming_enabled():
+            return await self._request_streaming_turn(
+                text,
+                play_send_sound=play_send_sound,
+            )
+        return await self._request_complete_turn(
+            text,
+            play_send_sound=play_send_sound,
+        )
+
+    async def _request_complete_turn(
+        self,
+        text: str,
+        *,
+        play_send_sound: bool,
+    ) -> tuple[str | None, bool]:
+        """发起一次明确的 non-streaming 请求并返回完整正文。"""
+
+        prompt = text
+        if self.backend._rule_prompt:
+            prompt = text + "\n" + self.backend._rule_prompt
+
+        request_task = asyncio.create_task(
+            self.backend._request_chat_completion(prompt)
+        )
+        self._complete_request_task = request_task
+        try:
+            if play_send_sound:
+                await self._play_send_sound()
+            return await request_task, False
+        except BaseException:
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            raise
+        finally:
+            if (
+                getattr(self, "_complete_request_task", None)
+                is request_task
+            ):
+                self._complete_request_task = None
 
     def _progress_config(self):
         value = self._cfg("progress", {})
