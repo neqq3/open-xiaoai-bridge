@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: hermes-final-preview-f85aa13
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -131,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -193,3 +193,20 @@ jobs:
             /tmp/digests/platforms.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: Checkout reporting branch
+        uses: actions/checkout@v4
+        with:
+          ref: test/hermes-final-preview-f85aa13
+          path: result-repo
+
+      - name: Record published image digest on branch
+        run: |
+          cp /tmp/digests/preview-image.txt result-repo/hermes-final-preview-result.txt
+          cd result-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hermes-final-preview-result.txt
+          git diff --cached --quiet && exit 0
+          git commit -m "ci: record Hermes final preview image"
+          git push
