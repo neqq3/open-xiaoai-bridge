@@ -1,0 +1,4 @@
+image=ghcr.io/neqq3/open-xiaoai-bridge:hermes-final-f85aa13
+digest=sha256:8a12802547fe6c78772a28b5178f3fc5288fda16967ac5c4ebe3a4ea1d1faca5
+digest_ref=ghcr.io/neqq3/open-xiaoai-bridge@sha256:8a12802547fe6c78772a28b5178f3fc5288fda16967ac5c4ebe3a4ea1d1faca5
+source_commit=f85aa130b2563f12542b63c621383fb157ac8268
