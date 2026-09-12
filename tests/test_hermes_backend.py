@@ -449,7 +449,7 @@ class HermesBackendTest(unittest.TestCase):
         self.assertEqual("完成", asyncio.run(scenario()))
         self.assertEqual(["weather"], [event.tool for event in progress])
 
-    def test_default_routes_send_diga_directly_to_hermes(self):
+    def test_default_routes_send_hermes_commands_directly_to_hermes(self):
         spec = importlib.util.spec_from_file_location(
             "hermes_route_config_test",
             ROOT / "config.py",

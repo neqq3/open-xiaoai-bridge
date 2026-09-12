@@ -487,7 +487,7 @@ cp -a skills/xiaoai-tts "$HERMES_ROOT/skills/xiaoai-tts"
 echo 'OPENXIAOAI_BASE_URL="http://bridge-host:9092"' >> "$HERMES_ROOT/.env"
 ```
 
-在 Skill 中使用 `${HERMES_SKILL_DIR}/tools/xiaoai-tts --blocking`，只有收到 `RESULT success=true completed=true` 才应声称播报成功。需要 Agent 自己决定何时播报时，调用 `app.send_to_hermes()`，并在部署配置的 `hermes.rule_prompt_for_skill` 中说明使用 `xiaoai-tts`；该路径不会自动播放 Hermes final，因此不会与主动播报重复。普通自动播放仍使用 `app.send_to_hermes_and_play_reply()`。
+在 Skill 中使用 `${HERMES_SKILL_DIR}/tools/xiaoai-tts tts "需要播报的文本" --blocking`，只有收到 `RESULT success=true completed=true` 才应声称播报成功。需要 Agent 自己决定何时播报时，调用 `app.send_to_hermes()`，并在部署配置的 `hermes.rule_prompt_for_skill` 中说明使用 `xiaoai-tts`；该路径不会自动播放 Hermes final，因此不会与主动播报重复。普通自动播放仍使用 `app.send_to_hermes_and_play_reply()`。
 
 ### 常用与高级配置
 
