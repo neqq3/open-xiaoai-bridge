@@ -8,6 +8,7 @@ import open_xiaoai_server
 from core.ref import get_speaker, set_xiaoai
 from core.services.audio.stream import GlobalStream
 from core.services.speaker import SpeakerManager
+from core.services.visual_audio import visual_audio
 from core.wakeup_session import EventManager
 from core.xiaoai_conversation import XiaoAIConversationController
 from core.utils.base import json_decode
@@ -109,6 +110,8 @@ class XiaoAI:
 
     @classmethod
     def on_input_data(cls, data: bytes):
+        # 可视化使用增益前的副本；关闭时不保留数据，不影响 ASR/KWS 输入。
+        visual_audio.push(data)
         audio_array = np.frombuffer(data, dtype=np.int16)
         if cls._input_gain_enabled and audio_array.size > 0:
             boosted = audio_array.astype(np.float32) * cls._input_gain

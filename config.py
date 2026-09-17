@@ -167,6 +167,15 @@ async def after_wakeup(speaker, source=None, session_key=None):
         await speaker.play(text="小智，再见")
 
 APP_CONFIG = {
+    # 实验功能：当前只验证 OH2P 1.62.2；其他设备不启用。
+    # public_url 必须从音箱可达，Docker 需映射 9093；关闭时不监听此端口。
+    "native_visual": {
+        "enabled": False,
+        "public_url": "",
+        "bind_host": "0.0.0.0",
+        "port": 9093,
+        "listening_gain": 0.25,  # 只改变白灯幅度，不改变 ASR/KWS 输入增益
+    },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
         "keywords": [

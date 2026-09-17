@@ -1,0 +1,236 @@
+"""共享对话阶段接口；OH2P 的数字事件和原厂命令只存在于此适配层。
+
+默认关闭。当前固件没有独占租约/带请求归属的播放完成事件，因此属于显式启用的
+实验功能，不能将状态轮询当作无竞态的原厂资源锁。
+"""
+
+import asyncio
+import json
+import math
+import re
+import shlex
+import threading
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from aiohttp import web
+
+from core.services.visual_audio import visual_audio
+from core.utils.logger import logger
+
+
+class NativeVisualUnavailable(RuntimeError):
+    """设备忙、能力不匹配或会话结果不明确，不能继续操作原厂状态。"""
+
+
+def ubus_command(service, method, payload):
+    return f"ubus -t 2 call {service} {method} " + shlex.quote(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def parse_reply(result):
+    if result is None or result.exit_code != 0:
+        raise NativeVisualUnavailable("device command failed")
+    try:
+        reply = json.loads(result.stdout)
+        if (not isinstance(reply, dict) or type(reply.get("code")) is not int
+                or reply["code"] != 0):
+            raise ValueError()
+        return reply
+    except (ValueError, TypeError):
+        raise NativeVisualUnavailable("invalid device reply") from None
+
+
+class NativeVisualService:
+    """在 MainApp.loop 上管理单设备阶段，音频线程仅写入有限 PCM 槽。"""
+
+    def __init__(self, relay=visual_audio):
+        self.relay = relay
+        self.runner = None
+        self.session = None
+        self.lock = asyncio.Lock()
+        self.quarantined = False
+
+    async def open(self, speaker, settings):
+        if not settings.get("enabled", False):
+            return None
+        async with self.lock:
+            if self.quarantined or self.session is not None:
+                raise NativeVisualUnavailable("visual service still occupied")
+            # 只启用已实测组合。其他型号/版本保持原有 Bridge 行为。
+            result = await speaker.run_shell(
+                "printf '%s\\n' \"$(micocfg_model)\"; "
+                "cat /etc/banner; "
+                "command -v curl >/dev/null && test -p /tmp/mic_audio.fifo",
+                timeout=4000,
+            )
+            if (not result or result.exit_code or result.stdout.splitlines()[0:1] != ["OH2P"]
+                    or not re.search(r"\bVer:1\.62\.2\s", result.stdout)):
+                raise NativeVisualUnavailable("unsupported native visual capability")
+            base = str(settings.get("public_url", "")).rstrip("/")
+            parsed = urlsplit(base)
+            if (parsed.scheme != "http" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.path or parsed.query or parsed.fragment):
+                raise NativeVisualUnavailable("set a reachable HTTP public_url without path")
+            if self.runner is None:
+                app = web.Application()
+                app.router.add_get("/native-visual/{token}", self.relay.handle_stream, allow_head=False)
+                runner = web.AppRunner(app, access_log=None, shutdown_timeout=0.5)
+                await runner.setup()
+                try:
+                    await web.TCPSite(runner, str(settings.get("bind_host", "0.0.0.0")),
+                                      int(settings.get("port", 9093))).start()
+                except BaseException:
+                    await runner.cleanup()
+                    raise
+                self.runner = runner
+            session = NativeVisualSession(self, speaker, base, settings.get("listening_gain", 0.25))
+            self.session = session
+            return session
+
+    def preempt(self):
+        """原厂唤醒回调可跨线程撤销供数；不从回调线程发送设备命令。"""
+        session = self.session
+        if session is not None:
+            session.preempted.set()
+            lease = session.lease
+            if lease is not None:
+                self.relay.close(lease)
+
+    async def shutdown(self):
+        if self.session:
+            await self.session.close()
+        self.relay.close_all()
+        if self.runner:
+            await self.runner.cleanup()
+            self.runner = None
+
+
+class NativeVisualSession:
+    def __init__(self, service, speaker, base, listening_gain=0.25):
+        self.service, self.speaker, self.base = service, speaker, base
+        self.listening_gain = float(listening_gain)
+        if not math.isfinite(self.listening_gain) or not 0.05 <= self.listening_gain <= 1.0:
+            raise NativeVisualUnavailable("listening_gain must be between 0.05 and 1.0")
+        self.preempted = threading.Event()
+        self.lease = None
+        self.task = None
+        self.closed = False
+
+    def _check(self):
+        if self.closed or self.preempted.is_set():
+            raise NativeVisualUnavailable("native visual session interrupted")
+
+    async def phase(self, name, seconds=30):
+        self._check()
+        await self.clear()
+        self._check()
+        if name not in ("listening", "thinking") or not math.isfinite(seconds):
+            raise ValueError("invalid conversation phase")
+        seconds = min(60, max(1, math.ceil(seconds)))
+        lease = self.service.relay.begin(seconds, heartbeat=name == "thinking", gain=self.listening_gain)
+        self.lease = lease
+        if self.preempted.is_set():
+            self.service.relay.close(lease)
+            self._check()
+        script = Path(__file__).with_name("oh2p_visual_phase.sh").read_text(encoding="utf-8")
+        url = self.base + "/native-visual/" + lease.token
+        command = "busybox timeout -t " + str(seconds + 5) + " sh -c " + shlex.quote(script)
+        command += " sh " + " ".join(map(shlex.quote, [name, url, str(seconds)]))
+        self.task = asyncio.create_task(self.speaker.run_shell(command, timeout=(seconds + 8) * 1000))
+        try:
+            async with asyncio.timeout(4):
+                while not lease.claimed:
+                    self._check()
+                    if self.task.done() or lease.closed:
+                        raise NativeVisualUnavailable("device did not accept visual phase")
+                    await asyncio.sleep(0.02)
+        except BaseException:
+            await self.clear()
+            raise
+
+    async def clear(self):
+        """先撤销供数，再等待设备自己清理；旧 RPC 未结束前禁止进入下一阶段。"""
+        lease, task = self.lease, self.task
+        self.lease = self.task = None
+        if lease:
+            self.service.relay.close(lease)
+        if task:
+            try:
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=4)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # RPC 取消不等于远端子进程退出；隔离至应用重启，设备独立期限兜底。
+                self.service.quarantined = True
+                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                raise
+            if result is None or result.exit_code != 0:
+                self.preempted.set()
+                details = re.search(r"visual_result=\d+ native_takeover=\d+", result.stdout) if result else None
+                reason = re.search(r"visual_abort=[a-z_]+", result.stdout) if result else None
+                raise NativeVisualUnavailable("device phase ended abnormally: " +
+                                              (details.group() if details else "no completion marker") +
+                                              (" " + reason.group() if reason else ""))
+
+    async def _status(self):
+        reply = parse_reply(await self.speaker.run_shell(
+            ubus_command("mediaplayer", "player_get_play_status", {}), timeout=3000))
+        info = reply.get("info")
+        try:
+            info = json.loads(info) if isinstance(info, str) else info
+            value = info["status"]
+            if type(value) is not int or value not in (0, 1, 2):
+                raise ValueError()
+            return value
+        except (TypeError, KeyError, ValueError):
+            raise NativeVisualUnavailable("unknown native player state") from None
+
+    async def speak(self, text, timeout=120):
+        """只发起一次原厂 TTS；观察 busy→idle，不在结果不明时重播或全局停止。
+
+        此状态是设备级观测，并非带请求归属的完成凭据；原厂抢占时直接退出会话。
+        """
+        await self.clear()
+        self._check()
+        if await self._status() != 0:
+            raise NativeVisualUnavailable("native player busy")
+        guard = Path(__file__).with_name("oh2p_visual_phase.sh").read_text(encoding="utf-8")
+        guard_result = await self.speaker.run_shell("sh -c " + shlex.quote(guard) + " sh check '' 1", timeout=6000)
+        if not guard_result or guard_result.exit_code:
+            raise NativeVisualUnavailable("native speech lifecycle occupied")
+        request = ubus_command("mibrain", "text_to_speech", {"text": text, "save": 0, "play": 1})
+        # 合成可能超过普通 UBus 两秒期限；调用后失败不做自动回退，以免重复播报。
+        request = request.replace("ubus -t 2 ", "ubus -t 30 ", 1)
+        parse_reply(await self.speaker.run_shell(request, timeout=32000))
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        seen_playing = False
+        idle_since = None
+        while loop.time() - started < timeout:
+            self._check()
+            status = await self._status()
+            if status == 1:
+                seen_playing, idle_since = True, None
+            elif status == 0 and seen_playing:
+                idle_since = loop.time() if idle_since is None else idle_since
+                if loop.time() - idle_since >= 0.3:
+                    return
+            elif status == 2:
+                raise NativeVisualUnavailable("native playback paused or preempted")
+            if not seen_playing and loop.time() - started > 8:
+                raise NativeVisualUnavailable("native playback start not observed")
+            await asyncio.sleep(0.1)
+        raise NativeVisualUnavailable("native playback completion not observed")
+
+    async def close(self):
+        try:
+            await self.clear()
+        except Exception as exc:
+            logger.warning(f"灯效会话清理结果不明确：{type(exc).__name__}", module="Native Visual")
+        finally:
+            self.closed = True
+            if self.service.session is self:
+                self.service.session = None
+
+
+native_visual = NativeVisualService()

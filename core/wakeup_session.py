@@ -51,6 +51,10 @@ class WakeupSessionManager:
         await open_xiaoai_server.start_recording()
 
     def on_interrupt(self):
+        from core.services.native_visual import native_visual
+
+        visual_active = native_visual.session is not None
+        native_visual.preempt()
         logger.info("[Wakeup] XiaoAI wakeup — interrupting active sessions")
 
         loop = self._get_loop()
@@ -77,7 +81,13 @@ class WakeupSessionManager:
         if self._qwenpaw_task and not self._qwenpaw_task.done():
             loop.call_soon_threadsafe(self._qwenpaw_task.cancel)
 
-        asyncio.run_coroutine_threadsafe(self._stop_device_playback(), loop)
+        if visual_active:
+            # 原厂已经接管时只恢复 Bridge 录音，不再对原厂播放器发全局暂停。
+            import open_xiaoai_server
+
+            asyncio.run_coroutine_threadsafe(open_xiaoai_server.start_recording(), loop)
+        else:
+            asyncio.run_coroutine_threadsafe(self._stop_device_playback(), loop)
 
         from core.xiaoai import XiaoAI
         XiaoAI.stop_conversation()
