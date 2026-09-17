@@ -78,6 +78,10 @@ docker compose up -d
 
 > **💡 容器访问宿主机服务**：如果需要让容器访问宿主机上的 OpenClaw / QwenPaw，请查看 [Docker 常见问题](#-docker)。
 
+> **💡 原厂对话灯效（实验）**：仅适配 OH2P 1.62.2，默认关闭。参见
+> [参数默认值、兼容范围和最小部署步骤](docs/native-visual.md)，或使用
+> [独立 Compose 示例](docker-compose.native-visual.yml) 从当前源码构建。
+
 `docker-compose.yml` 已包含模型目录挂载：
 
 ```yaml

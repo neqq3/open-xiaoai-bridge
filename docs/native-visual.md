@@ -7,29 +7,131 @@
 QwenPaw 均通过同一阶段接口进入。原厂 `xiaoai_asr` 继续使用自身会话。
 回答灯目前仅随 `tts_speaker=xiaoai` 的原厂 TTS 路径生效。
 
-## 配置
+## 兼容范围
+
+| 设备 / 使用方式 | 当前行为 |
+| --- | --- |
+| OH2P / 1.62.2 / `local_asr` | 显式启用并通过检查后使用三阶段灯效；回答灯要求 `tts_speaker="xiaoai"` |
+| LX06、其他型号或 OH2P 其他固件 | 未适配；跳过新增灯效，继续原有对话流程 |
+| `xiaoai_asr` | 保持原厂会话，不接入本功能 |
+| 没有 `native_visual` 配置或 `enabled=False` | 保持原有流程，不探测设备、不启动灯效端口 |
+
+型号和版本检查是已验证范围的限制，不是通用能力认证。不能通过改型号名单来代替适配和实机测试。
+本功能也不会改变原厂“小爱同学”的唤醒词或把其他后端自动切换到 `local_asr`。
+
+## 配置与默认值
+
+沿用项目的 `config.py` / `APP_CONFIG` 配置方式；灯效参数不需要额外的环境变量。
+仓库默认配置如下，已有用户配置可以完全省略这一段：
 
 ```python
 "native_visual": {
-    "enabled": True,
-    "public_url": "http://你的Bridge局域网地址:9093",
+    "enabled": False,
+    "public_url": "",
     "bind_host": "0.0.0.0",
     "port": 9093,
     "listening_gain": 0.25,
 },
 ```
 
-Docker 需要额外映射 `9093:9093`。这是独立于可选 REST API 的有限音频回送端口。
-功能关闭时不启动监听；启动后也只有当前收音阶段持有的随机短期令牌能消费一次流。
+| 参数 | 默认值 | 用途 / 取值 |
+| --- | --- | --- |
+| `enabled` | `False` | Python 布尔值；`True` 请求启用，仍需通过设备检查 |
+| `public_url` | `""` | 启用时填写音箱可访问的 HTTP 地址，包含映射后的端口；不带路径、用户名、密码、查询串或片段 |
+| `bind_host` | `"0.0.0.0"` | Bridge 进程的监听地址；Docker bridge 网络中通常保持默认 |
+| `port` | `9093` | Bridge 内监听端口；选择未占用的整数端口 1～65535 |
+| `listening_gain` | `0.25` | 白灯幅度系数，范围 0.05～1.0；数值越大，白灯越敏感 |
+
+`listening_gain` 与 `audio_input.gain` 相互独立，不改变 ASR/KWS 输入或扬声器音量。
+OH2P 1.62.2 实测中，测试者反馈 0.30 比 0.25 更接近原厂白灯灵敏度，可从 0.25 开始微调；
+这不是其他设备的通用校准值。
+
+### 最小启用配置
+
+在原有 `APP_CONFIG` 中添加以下字段即可，其余字段使用上述默认值：
+
+```python
+"native_visual": {
+    "enabled": True,
+    "public_url": "http://192.168.1.100:9093",  # 改成运行 Bridge 的主机局域网地址
+},
+```
+
+需要调白灯时再添加 `"listening_gain": 0.30`。使用的后端还应配置
+`"input_mode": "local_asr"` 和 `"tts_speaker": "xiaoai"`，并通过原有唤醒路由进入对话。
+修改配置后重启 Bridge；修改监听地址或端口也应重启，不依赖热重载重新绑定端口。
+
+## 最小 Docker Compose 示例
+
+仓库根目录的 [docker-compose.native-visual.yml](../docker-compose.native-visual.yml)
+是可独立使用的示例，沿用主 Compose 的 OpenClaw 后端和配置挂载方式，仅发布 Client
+连接端口 4399 和灯效回送端口 9093。灯效不依赖 REST API，因此这里不启用 9092。
+示例从当前源码构建；不要假定上游 `latest` 已包含尚未合入的改动。
+
+```yaml
+services:
+  open-xiaoai-bridge:
+    build: .
+    image: open-xiaoai-bridge:native-visual-local
+    restart: unless-stopped
+    ports:
+      - "4399:4399"
+      - "9093:9093"
+    environment:
+      - LOGLEVEL=INFO
+      - OPENCLAW_ENABLE=1
+    volumes:
+      - ./config.py:/app/config.py:ro
+      - ./openclaw:/app/openclaw
+      - ./models:/app/core/models
+```
+
+1. 在包含本功能的仓库根目录操作，按 README 将 VAD / KWS / ASR 模型放进 `./models`。
+2. 编辑现有 `config.py`：填写 OpenClaw 的 `url`、`token`，保持 `local_asr`、`tts_speaker="xiaoai"`，
+   再添加上面的最小灯效配置。容器内的 `127.0.0.1` 指容器自身；后端地址应从容器可达。
+3. 使用以下命令检查配置、构建并启动：
+
+```bash
+docker compose -f docker-compose.native-visual.yml config --quiet
+docker compose -f docker-compose.native-visual.yml up -d --build
+docker compose -f docker-compose.native-visual.yml logs -f
+```
+
+4. 将现有音箱 Client 连接到这台主机的 4399 端口，使用配置中的 OpenClaw 唤醒词测试。
+   这份示例与原服务使用相同端口，切换前应停止占用端口的旧实例；不要并行启动争用端口。
+
+已有部署只需在原 Compose 中增加 `9093:9093`，并使用包含灯效代码的镜像；保留原来的后端、
+环境变量、配置和模型挂载即可。上面的示例不是要求已有用户改用 OpenClaw。
+如使用 OpenAI-compatible 或 QwenPaw，按 README 换成对应的后端开关、连接配置及唤醒路由。
+
+### 宿主机端口不同的情况
+
+例如宿主机 9093 已被占用，可改映射为 `19093:9093`：
+
+```yaml
+ports:
+  - "4399:4399"
+  - "19093:9093"
+```
+
+此时 `public_url` 改为 `http://192.168.1.100:19093`，`native_visual.port` 仍为 `9093`。
+`public_url` 不能填 `0.0.0.0`、`localhost` 或仅容器内部可解析的服务名；它是音箱访问 Bridge 的地址。
+回送流供局域网音箱使用，不应把该端口映射到公网。
+
+功能关闭时不启动监听；启动后收音流使用随机短期令牌，限制为单消费者。
 等待阶段只发送租约心跳，不发送麦克风。请求访问日志关闭，语音不保存到文件。
 
-`listening_gain` 仅调整白灯幅度，范围0.05～1.0，与 `audio_input.gain` 相互独立。
-例如从0.25改为0.30会使可视化幅度增加20%，不改变识别或音量。
+### 常见问题
+
+- **能对话但没有灯效**：确认使用包含本功能的版本，检查设备 / 固件、`enabled`、后端输入模式和日志中的“原厂灯效未启用”原因。
+- **等待或白灯无法正常工作**：核对音箱到 `public_url` 的路由、防火墙以及宿主机 / 容器端口映射。
+- **白灯太敏感或不敏感**：只调 `listening_gain`，从 0.25 小幅调整；不要为调灯效修改 ASR 输入增益。
+- **恢复原行为**：把 `enabled` 改回 `False` 并重启 Bridge；不需要重新刷固件。
 
 ## 阶段与实现
 
 - 收音：增益前的16kHz单声道PCM副本，在主机转换为48kHz双声道S16，按已校准的
-  1/4增益回送。音箱预装 curl 写入已有 `mic_audio.fifo`，由原厂 vis/ledd 驱动白灯。
+  默认1/4增益回送（可通过 `listening_gain` 调整）。音箱预装 curl 写入已有 `mic_audio.fifo`，由原厂 vis/ledd 驱动白灯。
   输入回调不等待网络，缓存只留最新块，按10ms包节奏输出。
 - 等待：原厂蓝色移动短条，收到回复或会话结束时撤销。白灯和蓝灯的状态字符串不同，
   适配器分别处理。
