@@ -186,14 +186,15 @@ async def after_wakeup(speaker, source=None, session_key=None):
         await speaker.play(text="小智，再见")
 
 APP_CONFIG = {
-    # 实验功能：当前只验证 OH2P 1.62.2；其他设备不启用。
-    # public_url 必须从音箱可达，Docker 需映射 9093；关闭时不监听此端口。
+    # 原厂对话灯效（实验）：仅适配 OH2P 1.62.2 的 local_asr 对话，默认关闭。
+    # 不支持的设备跳过灯效，继续原有对话；无需修改固件或 Client。
+    # 配置与 Docker 示例：docs/native-visual.md
     "native_visual": {
-        "enabled": False,
-        "public_url": "",
-        "bind_host": "0.0.0.0",
-        "port": 9093,
-        "listening_gain": 0.25,  # 只改变白灯幅度，不改变 ASR/KWS 输入增益
+        "enabled": False,  # 设为 True 后仍会检查设备型号、固件和必要条件
+        "public_url": "",  # 必填（启用时）：http://Bridge局域网IP:9093，使用宿主机映射端口
+        "bind_host": "0.0.0.0",  # Bridge 内监听地址；Docker bridge 网络中保留此值
+        "port": 9093,  # Bridge 内监听端口，需与 Compose 容器端口一致
+        "listening_gain": 0.25,  # 0.05～1.0；只改变白灯幅度，可尝试 0.30，不改变 ASR/KWS 增益
     },
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）

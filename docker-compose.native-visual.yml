@@ -1,0 +1,19 @@
+# 独立最小示例：在仓库根目录执行
+# docker compose -f docker-compose.native-visual.yml up -d --build
+# 先编辑 config.py 的 openclaw 和 native_visual；详见 docs/native-visual.md。
+# 使用当前源码构建，避免误用尚未包含灯效功能的上游 latest 镜像。
+services:
+  open-xiaoai-bridge:
+    build: .
+    image: open-xiaoai-bridge:native-visual-local
+    restart: unless-stopped
+    ports:
+      - "4399:4399"
+      - "9093:9093"
+    environment:
+      - LOGLEVEL=INFO
+      - OPENCLAW_ENABLE=1
+    volumes:
+      - ./config.py:/app/config.py:ro
+      - ./openclaw:/app/openclaw
+      - ./models:/app/core/models
