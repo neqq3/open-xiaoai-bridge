@@ -73,6 +73,8 @@ class VisualLease:
     closed: bool = False
     sequence: int = 0
     heartbeat: bool = False
+    control: bool = False
+    preserve_on_close: bool = False
     gain: float = 0.25
     latest: tuple[int, float, bytes] | None = field(default=None, repr=False)
 
@@ -182,7 +184,7 @@ class VisualAudioRelay:
                 now = self._clock()
                 if lease.heartbeat:
                     # 等待阶段只维持可撤销租约，不订阅或传输麦克风。
-                    await asyncio.wait_for(response.write(b"\0"), timeout=0.1)
+                    await asyncio.wait_for(response.write(b"0" if lease.control else b"\0"), timeout=0.1)
                     await asyncio.sleep(0.1)
                     continue
                 if now - last_input >= INPUT_TIMEOUT:
@@ -213,6 +215,9 @@ class VisualAudioRelay:
                 await asyncio.wait_for(response.write(packet), timeout=0.1)
                 # 从实际交付时刻安排下一包，慢网络不追赶式突发补写。
                 next_due = self._clock() + len(packet) / OUTPUT_BYTES_PER_SECOND
+            if lease.control:
+                # LX06 无 OH2P 的原厂 FIFO 写端观测。用结束标记区分正常清理和原厂接管。
+                await asyncio.wait_for(response.write(b"P" if lease.preserve_on_close else b"C"), timeout=0.1)
             await asyncio.wait_for(response.write_eof(), timeout=0.1)
         except (ConnectionError, asyncio.TimeoutError):
             aborted = True

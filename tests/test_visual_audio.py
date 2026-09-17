@@ -86,6 +86,19 @@ class VisualLeaseTests(unittest.TestCase):
 
 
 class VisualHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lx06_control_end_distinguishes_clear_and_takeover(self):
+        for preserve in (False, True):
+            with self.subTest(preserve=preserve):
+                lease = self.relay.begin(2, heartbeat=True)
+                lease.control = True
+                response = await self.client.get('/visual/' + lease.token)
+                self.assertEqual(await response.content.readexactly(1), b'0')
+                lease.preserve_on_close = preserve
+                self.relay.close(lease)
+                tail = await asyncio.wait_for(response.read(), 0.5)
+                self.assertTrue(tail.endswith(b'P' if preserve else b'C'))
+                self.assertIsNone(lease.latest)
+
     async def asyncSetUp(self):
         self.relay = VisualAudioRelay()
         app = web.Application()

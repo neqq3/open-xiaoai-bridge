@@ -3,6 +3,9 @@
 当前适配 OH2P 1.62.2，默认关闭。实现位于 Bridge，使用现有 Client 的录音流和
 `run_shell`，不要求重新刷固件、更新 Client 或安装设备端二进制。
 
+本实验分支另含 [LX06 1.94.13 原型](lx06-native-visual.md)，必须显式选择实验 profile，
+未经过实机验证。下面兼容表描述默认 `profile="auto"` 的行为。
+
 适用于共享 `ExternalConversationController` 的 `local_asr` 对话；OpenAI、OpenClaw、
 QwenPaw 均通过同一阶段接口进入。原厂 `xiaoai_asr` 继续使用自身会话。
 回答灯目前仅随 `tts_speaker=xiaoai` 的原厂 TTS 路径生效。
@@ -27,6 +30,7 @@ QwenPaw 均通过同一阶段接口进入。原厂 `xiaoai_asr` 继续使用自�
 ```python
 "native_visual": {
     "enabled": False,
+    "profile": "auto",
     "public_url": "",
     "bind_host": "0.0.0.0",
     "port": 9093,
@@ -37,6 +41,7 @@ QwenPaw 均通过同一阶段接口进入。原厂 `xiaoai_asr` 继续使用自�
 | 参数 | 默认值 | 用途 / 取值 |
 | --- | --- | --- |
 | `enabled` | `False` | Python 布尔值；`True` 请求启用，仍需通过设备检查 |
+| `profile` | `"auto"` | 自动选择已验证型号；LX06 实验值及限制见专门说明，不能绕过型号/版本检查 |
 | `public_url` | `""` | 启用时填写音箱可访问的 HTTP 地址，包含映射后的端口；不带路径、用户名、密码、查询串或片段 |
 | `bind_host` | `"0.0.0.0"` | Bridge 进程的监听地址；Docker bridge 网络中通常保持默认 |
 | `port` | `9093` | Bridge 内监听端口；选择未占用的整数端口 1～65535 |

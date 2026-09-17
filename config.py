@@ -172,6 +172,7 @@ APP_CONFIG = {
     # 配置与 Docker 示例：docs/native-visual.md
     "native_visual": {
         "enabled": False,  # 设为 True 后仍会检查设备型号、固件和必要条件
+        "profile": "auto",  # auto 仅开放已实测 OH2P；LX06 原型见 docs/lx06-native-visual.md
         "public_url": "",  # 必填（启用时）：http://Bridge局域网IP:9093，使用宿主机映射端口
         "bind_host": "0.0.0.0",  # Bridge 内监听地址；Docker bridge 网络中保留此值
         "port": 9093,  # Bridge 内监听端口，需与 Compose 容器端口一致

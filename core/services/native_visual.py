@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from core.services.visual_audio import visual_audio
+from core.services.native_visual_profiles import OH2P, select_profile
 from core.utils.logger import logger
 
 
@@ -58,16 +59,24 @@ class NativeVisualService:
         async with self.lock:
             if self.quarantined or self.session is not None:
                 raise NativeVisualUnavailable("visual service still occupied")
-            # 只启用已实测组合。其他型号/版本保持原有 Bridge 行为。
+            # auto 只启用已实测组合；实验 profile 仍须匹配真实设备身份。
             result = await speaker.run_shell(
                 "printf '%s\\n' \"$(micocfg_model)\"; "
-                "cat /etc/banner; "
-                "command -v curl >/dev/null && test -p /tmp/mic_audio.fifo",
+                "cat /etc/banner",
                 timeout=4000,
             )
-            if (not result or result.exit_code or result.stdout.splitlines()[0:1] != ["OH2P"]
-                    or not re.search(r"\bVer:1\.62\.2\s", result.stdout)):
+            if not result or result.exit_code:
                 raise NativeVisualUnavailable("unsupported native visual capability")
+            try:
+                profile = select_profile(result.stdout, settings.get('profile', 'auto'))
+            except ValueError as exc:
+                raise NativeVisualUnavailable(str(exc)) from None
+            prerequisites = "command -v curl >/dev/null && "
+            prerequisites += ("test -p /tmp/mic_audio.fifo" if profile.microphone_relay
+                              else "test -x /bin/ledserver && pidof mipns-xiaomi >/dev/null")
+            check = await speaker.run_shell(prerequisites, timeout=3000)
+            if not check or check.exit_code:
+                raise NativeVisualUnavailable("missing native visual prerequisites")
             base = str(settings.get("public_url", "")).rstrip("/")
             parsed = urlsplit(base)
             if (parsed.scheme != "http" or not parsed.hostname or parsed.username
@@ -85,8 +94,10 @@ class NativeVisualService:
                     await runner.cleanup()
                     raise
                 self.runner = runner
-            session = NativeVisualSession(self, speaker, base, settings.get("listening_gain", 0.25))
+            session = NativeVisualSession(self, speaker, base, settings.get("listening_gain", 0.25), profile)
             self.session = session
+            if profile.experimental:
+                logger.warning("LX06 灯效为固件静态分析原型，尚未实机验证；不支持麦克风幅度回送", module="Native Visual")
             return session
 
     def preempt(self):
@@ -96,6 +107,7 @@ class NativeVisualService:
             session.preempted.set()
             lease = session.lease
             if lease is not None:
+                lease.preserve_on_close = True
                 self.relay.close(lease)
 
     async def shutdown(self):
@@ -108,8 +120,9 @@ class NativeVisualService:
 
 
 class NativeVisualSession:
-    def __init__(self, service, speaker, base, listening_gain=0.25):
+    def __init__(self, service, speaker, base, listening_gain=0.25, profile=OH2P):
         self.service, self.speaker, self.base = service, speaker, base
+        self.profile = profile
         self.listening_gain = float(listening_gain)
         if not math.isfinite(self.listening_gain) or not 0.05 <= self.listening_gain <= 1.0:
             raise NativeVisualUnavailable("listening_gain must be between 0.05 and 1.0")
@@ -129,12 +142,15 @@ class NativeVisualSession:
         if name not in ("listening", "thinking") or not math.isfinite(seconds):
             raise ValueError("invalid conversation phase")
         seconds = min(60, max(1, math.ceil(seconds)))
-        lease = self.service.relay.begin(seconds, heartbeat=name == "thinking", gain=self.listening_gain)
+        lease = self.service.relay.begin(seconds, heartbeat=name == "thinking" or not self.profile.microphone_relay,
+                                        gain=self.listening_gain)
+        lease.control = not self.profile.microphone_relay
         self.lease = lease
         if self.preempted.is_set():
+            lease.preserve_on_close = True
             self.service.relay.close(lease)
             self._check()
-        script = Path(__file__).with_name("oh2p_visual_phase.sh").read_text(encoding="utf-8")
+        script = Path(__file__).with_name(self.profile.phase_script).read_text(encoding="utf-8")
         url = self.base + "/native-visual/" + lease.token
         command = "busybox timeout -t " + str(seconds + 5) + " sh -c " + shlex.quote(script)
         command += " sh " + " ".join(map(shlex.quote, [name, url, str(seconds)]))
@@ -155,6 +171,8 @@ class NativeVisualSession:
         lease, task = self.lease, self.task
         self.lease = self.task = None
         if lease:
+            if self.preempted.is_set():
+                lease.preserve_on_close = True
             self.service.relay.close(lease)
         if task:
             try:
@@ -194,7 +212,7 @@ class NativeVisualSession:
         self._check()
         if await self._status() != 0:
             raise NativeVisualUnavailable("native player busy")
-        guard = Path(__file__).with_name("oh2p_visual_phase.sh").read_text(encoding="utf-8")
+        guard = Path(__file__).with_name(self.profile.phase_script).read_text(encoding="utf-8")
         guard_result = await self.speaker.run_shell("sh -c " + shlex.quote(guard) + " sh check '' 1", timeout=6000)
         if not guard_result or guard_result.exit_code:
             raise NativeVisualUnavailable("native speech lifecycle occupied")
