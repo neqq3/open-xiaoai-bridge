@@ -3,7 +3,8 @@
 当前适配 OH2P 1.62.2，默认关闭。实现位于 Bridge，使用现有 Client 的录音流和
 `run_shell`，不要求重新刷固件、更新 Client 或安装设备端二进制。
 
-本实验分支另含 [LX06 1.94.13 原型](lx06-native-visual.md)，必须显式选择实验 profile，
+统一适配分支 `dev/native-conversation-visual` 同时包含 OH2P 和 [LX06 1.94.13 原型](lx06-native-visual.md)。
+两款设备使用同一套上层接口和镜像，不需要按型号切换分支。LX06 必须显式选择实验 profile，
 未经过实机验证。下面兼容表描述默认 `profile="auto"` 的行为。
 
 适用于共享 `ExternalConversationController` 的 `local_asr` 对话；OpenAI、OpenClaw、
