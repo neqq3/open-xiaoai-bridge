@@ -396,6 +396,16 @@ class MainApp:
         self.shutdown_requested = True
         self.running = False
 
+        # 在停止业务循环前撤销麦克风租约并关闭专用 HTTP 服务。
+        from core.services.native_visual import native_visual
+
+        if self.loop and self.loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(native_visual.shutdown(), self.loop)
+            try:
+                future.result(timeout=5)
+            except Exception:
+                native_visual.relay.close_all()
+
         if self.xiaozhi:
             self.xiaozhi.shutdown()
 

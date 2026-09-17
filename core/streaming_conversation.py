@@ -112,6 +112,11 @@ class StreamingConversationController(ExternalConversationController):
                     return
                 try:
                     await self._play_tts(item.text)
+                    visual = getattr(self, "_visual", None)
+                    if (visual and item.kind == "progress" and not speech_queue.final_started
+                            and not progress_stop.is_set()):
+                        # 工具进度说完后仍在等 Agent；最终正文到达后不再插入等待阶段。
+                        await visual.phase("thinking", 60)
                 finally:
                     await speech_queue.finish(item)
 
@@ -205,7 +210,7 @@ class StreamingConversationController(ExternalConversationController):
                     task.cancel()
 
             speaker = get_speaker()
-            if speaker:
+            if speaker and not getattr(self, "_visual", None):
                 try:
                     await speaker.stop_device_audio()
                 except Exception as exc:

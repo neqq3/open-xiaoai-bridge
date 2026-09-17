@@ -86,6 +86,7 @@ class ExternalConversationController:
         self._loop: asyncio.AbstractEventLoop | None = None
         # Playback token for the current TTS session
         self._playback_token: int | None = None
+        self._visual = None
 
     # ---- config helpers ----
 
@@ -133,6 +134,15 @@ class ExternalConversationController:
         logger.info(f"🎙️ 进入 {self.BACKEND_NAME} 连续对话模式", module=self.LOG_MODULE)
 
         try:
+            if not self.uses_xiaoai_asr():
+                from core.services.native_visual import native_visual, NativeVisualUnavailable
+
+                try:
+                    self._visual = await native_visual.open(
+                        get_speaker(), self.config.get_app_config("native_visual", {})
+                    )
+                except NativeVisualUnavailable as exc:
+                    logger.warning(f"原厂灯效未启用：{exc}", module=self.LOG_MODULE)
             await self._conversation_loop()
         except Exception as exc:
             import traceback
@@ -143,6 +153,9 @@ class ExternalConversationController:
             )
         finally:
             self.stop()
+            if self._visual:
+                await self._visual.close()
+                self._visual = None
 
     def stop(self):
         """Exit conversation mode and clean up."""
@@ -213,7 +226,11 @@ class ExternalConversationController:
             return "error"
 
         # 1. Start listening for speech (recording is already active)
+        if self._visual:
+            await self._visual.phase("listening", self.timeout + 3)
         speech_bytes = await self._wait_for_speech(vad)
+        if self._visual:
+            await self._visual.clear()
         if speech_bytes is None:
             return "timeout"
 
@@ -225,6 +242,8 @@ class ExternalConversationController:
         # 2. ASR: convert speech to text
         from core.services.audio.asr import ASRService
 
+        if self._visual:
+            await self._visual.phase("thinking", 60)
         text = ASRService.asr(speech_bytes, sample_rate=16000)
         if not text:
             logger.debug("ASR empty, retrying", module=self.LOG_MODULE)
@@ -247,7 +266,10 @@ class ExternalConversationController:
             if not already_played:
                 speaker = get_speaker()
                 if speaker:
-                    await speaker.play(text="抱歉，我没有收到回复")
+                    if self._visual:
+                        await self._play_tts("抱歉，我没有收到回复")
+                    else:
+                        await speaker.play(text="抱歉，我没有收到回复")
                 return "continue"
 
         # 5. Stop recording → TTS → Notify → Start recording → Wait for silence
@@ -578,6 +600,12 @@ class ExternalConversationController:
 
     async def _play_tts(self, text: str):
         """Play text via Doubao TTS (blocks until playback finishes)."""
+        if self._visual:
+            await self._visual.clear()
+            if self.backend.get_tts_speaker_for_session_key() == "xiaoai":
+                # 原厂调用后的未知状态不能进入下面的兜底重播。
+                await self._visual.speak(text)
+                return
         self._playback_token = open_xiaoai_server.begin_playback_session()
         try:
             await self.backend._play_response_with_tts(

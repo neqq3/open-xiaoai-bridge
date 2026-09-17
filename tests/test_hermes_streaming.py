@@ -986,6 +986,73 @@ class HermesStreamingTest(unittest.TestCase):
         asyncio.run(scenario())
         self.assertIsNone(self.controller._playback_token)
 
+    def test_native_visual_routes_hermes_sentence_to_native_speech(self):
+        self.controller._visual = types.SimpleNamespace(clear=mock.AsyncMock(), speak=mock.AsyncMock())
+        self.controller.backend = types.SimpleNamespace(
+            get_tts_speaker_for_session_key=lambda: "xiaoai",
+            _play_response_with_tts=mock.AsyncMock(),
+        )
+        asyncio.run(self.controller._play_tts("流式回答的第一句"))
+        self.controller._visual.speak.assert_awaited_once_with("流式回答的第一句")
+        self.controller.backend._play_response_with_tts.assert_not_awaited()
+
+    def test_native_visual_unknown_result_is_not_replayed(self):
+        self.controller._visual = types.SimpleNamespace(
+            clear=mock.AsyncMock(), speak=mock.AsyncMock(side_effect=RuntimeError("unknown completion")))
+        self.controller.backend = types.SimpleNamespace(
+            get_tts_speaker_for_session_key=lambda: "xiaoai", _play_response_with_tts=mock.AsyncMock())
+        with self.assertRaisesRegex(RuntimeError, "unknown completion"):
+            asyncio.run(self.controller._play_tts("不能重播"))
+        self.controller.backend._play_response_with_tts.assert_not_awaited()
+
+    def test_native_visual_abort_does_not_pause_factory_player(self):
+        async def scenario():
+            async def request(_text, *, on_delta, on_tool_progress):
+                await on_delta("触发播放错误。")
+                await asyncio.Future()
+
+            self.controller._visual = types.SimpleNamespace(clear=mock.AsyncMock(), phase=mock.AsyncMock())
+            self.controller._play_tts = mock.AsyncMock(side_effect=RuntimeError("native takeover"))
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="", _session_key="test", request_streaming_chat_completion=request)
+            speaker = types.SimpleNamespace(stop_device_audio=mock.AsyncMock())
+            with mock.patch.object(self.streaming_module, "get_speaker", return_value=speaker):
+                with self.assertRaises(RuntimeError):
+                    await asyncio.wait_for(self.controller._request_streaming_turn("问题", play_send_sound=False), 1)
+            speaker.stop_device_audio.assert_not_awaited()
+            self.controller._start_recording.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_native_visual_progress_returns_to_thinking_before_final(self):
+        async def scenario():
+            resumed = asyncio.Event()
+            phases = []
+
+            async def phase(name, seconds):
+                phases.append(name)
+                resumed.set()
+
+            async def request(_text, *, on_delta, on_tool_progress):
+                await resumed.wait()
+                await on_delta("这是最终答案。")
+                return "这是最终答案。"
+
+            self.controller._visual = types.SimpleNamespace(phase=phase)
+            self.controller._play_tts = mock.AsyncMock()
+            self.controller._create_progress_narrator = lambda text: types.SimpleNamespace(
+                next_message=lambda: ("还在处理", "waiting"))
+            self.controller.config.values["hermes"]["progress"] = {
+                "enabled": True, "initial_delay": 1, "max_messages": 1}
+            self.controller.backend = types.SimpleNamespace(
+                _rule_prompt="", _session_key="test", request_streaming_chat_completion=request)
+            result = await asyncio.wait_for(
+                self.controller._request_streaming_turn("问题", play_send_sound=False), 3)
+            self.assertEqual(phases, ["thinking"])
+            self.assertEqual(result, ("这是最终答案。", True))
+
+        asyncio.run(scenario())
+
 
 async def _append_async(items, value):
     items.append(value)

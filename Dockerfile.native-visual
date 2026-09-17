@@ -1,0 +1,16 @@
+# NAS 集成镜像：复用已安装依赖，替换为当前 Git 提交的完整 Python 应用。
+# 构建前必须核对 BASE_IMAGE 对应源码的 native/、pyproject.toml、uv.lock 与本分支一致。
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
+LABEL org.opencontainers.image.source="https://github.com/neqq3/open-xiaoai-bridge"
+WORKDIR /app
+# 只移除新镜像层里的应用目录，原镜像和已有容器保持完整。
+RUN rm -rf /app/core /app/scripts
+COPY main.py config.py ./
+COPY core ./core
+COPY scripts ./scripts
+EXPOSE 4399 9092 9093
+# 沿用原来已生成的唤醒词文件，避免初始化步骤改写共享模型目录。
+CMD ["/app/.venv/bin/python", "main.py"]

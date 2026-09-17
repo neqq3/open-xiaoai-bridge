@@ -106,6 +106,13 @@ class HermesConversationController(StreamingConversationController):
     async def _play_tts(self, text: str):
         """播放一条排队中的 Hermes 语音，失败时不静默吞掉异常。"""
 
+        visual = getattr(self, "_visual", None)
+        if visual:
+            await visual.clear()
+            if self.backend.get_tts_speaker_for_session_key() == "xiaoai":
+                # 进度和最终分句共用原厂 speech 路径，等待本句结束再消费下一句。
+                await visual.speak(text)
+                return
         self._playback_token = open_xiaoai_server.begin_playback_session()
         try:
             played = await self.backend._play_response_with_tts(
