@@ -197,7 +197,7 @@ class NativeVisualSession:
         try:
             info = json.loads(info) if isinstance(info, str) else info
             value = info["status"]
-            if type(value) is not int or value not in (0, 1, 2):
+            if type(value) is not int or value not in (0, 1, 2, 3):
                 raise ValueError()
             return value
         except (TypeError, KeyError, ValueError):
@@ -210,7 +210,8 @@ class NativeVisualSession:
         """
         await self.clear()
         self._check()
-        if await self._status() != 0:
+        # 2 为暂停，3 也可由原厂结束路径返回；仍需下方会话/灯效占用检查。
+        if await self._status() not in (0, 2, 3):
             raise NativeVisualUnavailable("native player busy")
         guard = Path(__file__).with_name(self.profile.phase_script).read_text(encoding="utf-8")
         guard_result = await self.speaker.run_shell("sh -c " + shlex.quote(guard) + " sh check '' 1", timeout=6000)
@@ -229,11 +230,11 @@ class NativeVisualSession:
             status = await self._status()
             if status == 1:
                 seen_playing, idle_since = True, None
-            elif status == 0 and seen_playing:
+            elif status in (0, 3) and seen_playing:
                 idle_since = loop.time() if idle_since is None else idle_since
                 if loop.time() - idle_since >= 0.3:
                     return
-            elif status == 2:
+            elif status == 2 and seen_playing:
                 raise NativeVisualUnavailable("native playback paused or preempted")
             if not seen_playing and loop.time() - started > 8:
                 raise NativeVisualUnavailable("native playback start not observed")

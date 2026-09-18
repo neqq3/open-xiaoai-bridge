@@ -8,6 +8,28 @@ import unittest
 
 @unittest.skipIf(sys.platform == "win32", "需要 POSIX shell；在 Linux 候选容器中运行")
 class VisualShellTests(unittest.TestCase):
+    def test_snapshot_accepts_paused_music_but_rejects_playing_and_unknown(self):
+        source = (Path(__file__).parents[1] / "core/services/oh2p_visual_phase.sh").read_text()
+        snapshot = "snapshot()" + source.split("snapshot()", 1)[1].split("cleanup()", 1)[0]
+        # 执行真实 shell 检查，仅模拟 ubus/jshn 读数，不访问任何设备。
+        fixtures = '''
+ubus() { return 0; }
+json_load() { return 0; }
+json_get_var() {
+    case "$1" in
+        code) code=0;; info) info=unused;; media) media=$fixture_status;;
+        leds) leds='stored led ids: ; current id 0';;
+    esac
+}
+'''
+        for status, expected in (("0", 0), ("2", 0), ("3", 0), ("1", 1), ("4", 1), ("99", 1), ("", 1)):
+            with self.subTest(status=status):
+                result = subprocess.run(
+                    ["/bin/sh", "-c", 'fixture_status=$1\n' + fixtures + snapshot + '\nsnapshot', "sh", status],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+
     def test_stock_led_status_fixtures(self):
         source = (Path(__file__).parents[1] / "core/services/oh2p_visual_phase.sh").read_text()
         # 只执行无副作用的参数和状态格式部分；不加载设备 jshn 或运行任何设备命令。

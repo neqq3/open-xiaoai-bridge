@@ -121,11 +121,49 @@ class NativeVisualTests(unittest.IsolatedAsyncioTestCase):
             await self.session.speak("你好", timeout=0.2)
         self.assertEqual(self.speaker.run_shell.await_count, 2)
 
+    async def test_paused_music_allows_tts_but_waits_for_actual_start_and_finish(self):
+        self.session._status = AsyncMock(side_effect=[2, 2, 1, 0, 0, 0, 0, 0])
+        self.speaker.run_shell.return_value = reply({"code": 0})
+        await self.session.speak("你好")
+        self.assertEqual(self.speaker.run_shell.await_count, 2)
+        self.assertGreaterEqual(self.session._status.await_count, 7)
+
+    async def test_paused_music_without_tts_start_is_not_completion(self):
+        self.session._status = AsyncMock(return_value=2)
+        self.speaker.run_shell.return_value = reply({"code": 0})
+        with self.assertRaisesRegex(NativeVisualUnavailable, "completion not observed"):
+            await self.session.speak("你好", timeout=0.2)
+        self.assertEqual(self.speaker.run_shell.await_count, 2)
+
+    async def test_pause_after_tts_started_still_aborts_without_retry(self):
+        self.session._status = AsyncMock(side_effect=[2, 1, 2])
+        self.speaker.run_shell.return_value = reply({"code": 0})
+        with self.assertRaisesRegex(NativeVisualUnavailable, "paused or preempted"):
+            await self.session.speak("你好")
+        self.assertEqual(self.speaker.run_shell.await_count, 2)
+
     async def test_unknown_player_schema_aborts(self):
-        for status in ("0", None, True, 99):
+        for status in ("0", "3", None, True, 4, 99):
             self.speaker.run_shell.return_value = reply({"code": 0, "info": json.dumps({"status": status})})
             with self.assertRaises(NativeVisualUnavailable):
                 await self.session._status()
+
+    async def test_terminal_status_three_is_recognized(self):
+        self.speaker.run_shell.return_value = reply({"code": 0, "info": json.dumps({"status": 3})})
+        self.assertEqual(await self.session._status(), 3)
+
+    async def test_tts_can_start_and_finish_in_terminal_status_three(self):
+        self.session._status = AsyncMock(side_effect=[3, 3, 1, 3, 3, 3, 3, 3])
+        self.speaker.run_shell.return_value = reply({"code": 0})
+        await self.session.speak("你好")
+        self.assertEqual(self.speaker.run_shell.await_count, 2)
+
+    async def test_terminal_status_without_observed_playing_is_not_completion(self):
+        self.session._status = AsyncMock(return_value=3)
+        self.speaker.run_shell.return_value = reply({"code": 0})
+        with self.assertRaisesRegex(NativeVisualUnavailable, "completion not observed"):
+            await self.session.speak("你好", timeout=0.2)
+        self.assertEqual(self.speaker.run_shell.await_count, 2)
 
     async def test_text_is_single_json_shell_argument(self):
         text = "引号'\"; $(touch /tmp/should-not-exist)\n换行"

@@ -43,7 +43,8 @@ snapshot() {
     json_get_var info info
     json_load "$info" || return 1
     json_get_var media status
-    [ "$media" = 0 ] || return 1
+    # 暂停为 2，原厂结束路径还会返回 3；原厂会话和灯效另行检查。
+    case "$media" in 0|2|3) ;; *) return 1;; esac
     reply=$(ubus -t 1 call led status '{}') || return 1
     json_load "$reply" || return 1
     json_get_var leds info
