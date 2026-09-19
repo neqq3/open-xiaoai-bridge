@@ -112,6 +112,19 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.music.task)
         self.assertIsNone(self.visual.runner)
 
+    async def test_mode_reload_from_watcher_thread_preserves_live_transport(self):
+        self.music.loop = asyncio.get_running_loop()
+        self.music.renderer = SpectrumRenderer(50, 1)
+        self.music.lease = SpectrumLease(renderer=self.music.renderer)
+        token = self.music.lease.token
+        await asyncio.to_thread(self.music.config_changed, {}, {
+            'native_visual': {'music': {'brightness': 100, 'mode': 2}}})
+        await asyncio.sleep(0)
+        self.assertEqual(self.music.renderer.current_mode, 2)
+        self.assertEqual(self.music.renderer.brightness, 100)
+        self.assertEqual(self.music.lease.token, token)
+        self.assertFalse(self.music.lease.closed.is_set())
+
     async def test_speech_waits_for_remote_cleanup_and_holds_until_exit(self):
         self.music.lease = SpectrumLease()
         released = asyncio.Event()

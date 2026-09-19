@@ -203,6 +203,7 @@ class MainApp:
 
         # 音乐灯效运行在业务循环，关闭时不探测设备、不监听端口。
         from core.services.native_visual import native_visual
+        self.config.add_reload_listener(native_visual.music.config_changed)
         asyncio.run_coroutine_threadsafe(
             native_visual.music.start(self.config.get_app_config("native_visual", {})), self.loop
         )

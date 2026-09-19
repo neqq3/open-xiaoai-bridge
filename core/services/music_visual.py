@@ -23,6 +23,7 @@ class MusicVisualService:
         self.loop = None
         self.stopping = False
         self.quarantined = False
+        self.renderer = None
 
     async def audio(self, request):
         lease = self.lease
@@ -41,14 +42,30 @@ class MusicVisualService:
             return
         try:
             brightness = settings['music'].get('brightness', 50)
-            SpectrumRenderer(brightness)
+            renderer = SpectrumRenderer(brightness, settings['music'].get('mode', 'auto'))
             self.visual.public_url(settings)
         except (ValueError, TypeError) as exc:
             logger.warning(f"音乐灯效配置无效：{exc}", module="Music Visual")
             return
         self.loop = asyncio.get_running_loop()
         self.stopping = False
+        self.renderer = renderer
         self.task = asyncio.create_task(self._run(dict(settings), brightness))
+
+    def config_changed(self, previous, current):
+        """配置监视线程仅提交任务；模式和亮度变更在业务循环生效。"""
+        if self.loop and self.loop.is_running():
+            settings = current.get('native_visual', {}).get('music', {})
+            self.loop.call_soon_threadsafe(self._configure, dict(settings))
+
+    def _configure(self, settings):
+        if self.renderer is None:
+            return
+        try:
+            self.renderer.configure(settings.get('brightness', 50), settings.get('mode', 'auto'))
+            logger.info(f"音乐灯效模式：{self.renderer.mode}，亮度：{self.renderer.brightness}%", module="Music Visual")
+        except (ValueError, TypeError) as exc:
+            logger.warning(f"保留原音乐灯设置：{exc}", module="Music Visual")
 
     def preempt(self):
         """可从原生回调线程调用；所有租约状态更改仍在业务循环执行。"""
@@ -120,7 +137,7 @@ class MusicVisualService:
                 base = await self.visual.ensure_server(settings)
                 if self._busy():
                     continue
-                lease = SpectrumLease(brightness)
+                lease = SpectrumLease(renderer=self.renderer)
                 self.lease = lease
                 args = ['live', base, lease.token, str(lease.seconds)]
                 self.job = asyncio.create_task(speaker.run_shell(

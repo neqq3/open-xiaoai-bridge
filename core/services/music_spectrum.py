@@ -1,57 +1,18 @@
 """主机端频谱与有界 HTTP 租约；音频只留在内存，不保存录音。"""
 
 import asyncio
-import colorsys
 import secrets
 import time
 
-import numpy as np
+from core.services.spectrum_effects import SpectrumRenderer
 from aiohttp import web
-
-
-class SpectrumRenderer:
-    """OH2P 前排 12 灯的对称六频段布局，中心为低频，两端为高频。"""
-
-    def __init__(self, brightness=50):
-        if type(brightness) is not int or not 1 <= brightness <= 100:
-            raise ValueError("music.brightness must be an integer between 1 and 100")
-        self.brightness = brightness / 100
-        self.peaks = np.full(6, 2000.0)
-        self.levels = np.zeros(6)
-        self.window = np.hanning(1024)
-        # 采用设备请求的名义采样率；尚不作为校准过的频率测量工具。
-        frequencies = np.fft.rfftfreq(1024, 1 / 48000)
-        bounds = (40, 160, 400, 1000, 2500, 6000, 16000)
-        self.bands = [(frequencies >= a) & (frequencies < b)
-                      for a, b in zip(bounds, bounds[1:])]
-
-    def render(self, pcm):
-        stereo = np.frombuffer(pcm, dtype='<i2').reshape(1024, 2)
-        mono = stereo.astype(np.float64).mean(axis=1)
-        rms = float(np.sqrt(np.mean(mono * mono)))
-        if rms < 20:
-            self.levels *= .65
-        else:
-            magnitude = np.abs(np.fft.rfft(mono * self.window))
-            energy = np.array([np.max(magnitude[band]) for band in self.bands])
-            self.peaks = np.maximum(2000, np.maximum(energy, self.peaks * .98))
-            self.levels = np.maximum(np.clip(energy / self.peaks, 0, 1), self.levels * .78)
-        pixels = []
-        for physical in range(12):
-            band = int(abs(physical - 5.5))
-            value = float(self.levels[band]) * self.brightness
-            if rms < 20 and value < .01:
-                value = 0
-            r, g, b = (round(c * 255) for c in colorsys.hsv_to_rgb(band * .15, 1, value))
-            pixels.append(r | (g << 8) | (b << 16))
-        return pixels
 
 
 class SpectrumLease:
     """每次最多 120 秒，上传与下载各允许一次，输出仅保留最新帧。"""
 
-    def __init__(self, brightness=50, seconds=120):
-        self.renderer = SpectrumRenderer(brightness)
+    def __init__(self, brightness=50, seconds=120, renderer=None):
+        self.renderer = renderer if renderer is not None else SpectrumRenderer(brightness)
         self.token = secrets.token_hex(16)
         self.deadline = time.monotonic() + seconds
         self.seconds = seconds

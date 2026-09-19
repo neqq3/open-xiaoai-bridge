@@ -20,6 +20,7 @@ OH2P 1.62.2 可通过 Bridge 为音乐添加彩色频谱。频谱在运行 Bridg
     "music": {
         "enabled": True,
         "brightness": 50,
+        "mode": "auto",  # 1、2 或 "auto"
     },
 },
 ```
@@ -28,9 +29,10 @@ OH2P 1.62.2 可通过 Bridge 为音乐添加彩色频谱。频谱在运行 Bridg
 | --- | --- | --- |
 | `music.enabled` | `False` | 音乐频谱开关，与外层对话灯开关独立 |
 | `music.brightness` | `50` | 整数 1～100，控制彩灯最大亮度，不改变音量 |
+| `music.mode` | `"auto"` | `1` / `"1"`：双翼频谱；`2` / `"2"`：低音展开；`"auto"`：轮换 |
 
 省略 `music` 时不启动音乐监视任务、不采集播放回环。两种灯效都关闭时不启动灯效端口。
-修改配置后重启 Bridge。
+模式和亮度支持配置热重载；修改开关、监听地址或端口后重启 Bridge。
 
 Docker 部署沿用 [docker-compose.native-visual.yml](../docker-compose.native-visual.yml)，
 发布 `4399:4399` 和 `9093:9093` 即可；不需要额外的音乐灯端口或 REST API。
@@ -51,13 +53,22 @@ Docker 部署沿用 [docker-compose.native-visual.yml](../docker-compose.native-
 
 ## 显示方式
 
-当前提供一种对称六频段彩色频谱：低频放在前排中央，高频逐渐向两侧分布，亮度随
-各频段能量变化，并进行自动增益与回落平滑。OH2P 前排使用 12 个物理位置；正对音箱时
-0 号在右端、11 号在左端。没有将环形音箱的坐标直接套到 OH2P 上。
+效果移植自 [xiaomi-sound-spectrum](spectrum-attribution.md)，保留左右声道独立的
+八频段分析、整数增益与平滑算法，以及原配色和白色高亮：
 
-这是 Bridge 自身的频谱效果，不包含 `xiaomi-sound-spectrum` 的两模式轮换或微光待机。
-停止播放时直接结束频谱。名义采集格式为 48 kHz / 双声道 / S16_LE；频段尚未做物理
-频率校准，适合作为音乐可视化，不用于精确测量。
+- **模式 1**：左右频谱分区显示，强能量混入白色；低音鼓点和高频瞬态有独立提示。
+- **模式 2**：低音推动亮区从中央向两侧展开，回落时收缩；保留白色峰值与随频谱变化的配色。
+- **auto**：每处理 2800 个活动音频块切换一次，不把它标成固定一分钟；实际周期取决于回环出数速度。
+
+复用 OH2P 的 18→12 面积重采样：每个虚拟像素均有贡献，低音端落在前排中央，
+高频端分布到两端。正对音箱时物理 0 号在右端、11 号在左端。
+
+同一批人工 PCM 下，两个模式及轮换的逐帧颜色已与原 C 算法对照。网络输出最多约
+20 帧/秒，实际显示节奏可能与设备内直接运行不同，不承诺任何音乐下肉眼完全一致。
+传输续开会保留算法状态，不会每 120 秒重置自动轮换。
+
+暂停音乐仍按 Bridge 生命周期直接退出，不驻留以展示独立程序的微光待机过程。
+名义采集格式为 48 kHz / 双声道 / S16_LE，沿用原算法频点定义；尚未做物理频率校准。
 
 ## 运行边界
 
@@ -78,6 +89,7 @@ Docker 部署沿用 [docker-compose.native-visual.yml](../docker-compose.native-
 
 ```bash
 python -m unittest discover -s tests -p 'test*visual*.py' -v
+python -m unittest discover -s tests -p 'test_spectrum_effects.py' -v
 ```
 
 Linux 环境会额外执行设备脚本状态检查；单元测试不能替代真实灯带、播放声音和
