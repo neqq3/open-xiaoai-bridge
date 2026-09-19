@@ -69,6 +69,17 @@ class NativeVisualTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(NativeVisualUnavailable):
             await self.session.phase("thinking")
 
+    async def test_normal_phase_expiry_allows_answer_but_takeover_does_not(self):
+        for takeover in (0, 1):
+            result = types.SimpleNamespace(exit_code=25, stdout=f"visual_result=25 native_takeover={takeover}")
+            self.session.task = asyncio.create_task(asyncio.sleep(0, result=result))
+            if takeover:
+                with self.assertRaises(NativeVisualUnavailable):
+                    await self.session.clear()
+            else:
+                await self.session.clear()
+                self.session._check()
+
     async def test_cancelled_cleanup_quarantines_unconfirmed_remote_job(self):
         remote_done = asyncio.Event()
 

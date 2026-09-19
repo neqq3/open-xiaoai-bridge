@@ -371,6 +371,12 @@ class XiaoZhi:
             )
 
     async def start_wakeup_session(self):
+        from core.services.native_visual import native_visual
+
+        async with native_visual.music.speech():
+            await self._start_wakeup_session()
+
+    async def _start_wakeup_session(self):
         """Start a VAD-driven wakeup session: notify → listen → silence → stop."""
         if not self.protocol:
             logger.warning("XiaoZhi is not ready, skip wakeup session", module="XiaoZhi")

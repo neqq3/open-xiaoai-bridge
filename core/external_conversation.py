@@ -124,6 +124,12 @@ class ExternalConversationController:
         return self.active
 
     async def start(self):
+        from core.services.native_visual import native_visual
+
+        async with native_visual.music.speech():
+            await self._start_conversation()
+
+    async def _start_conversation(self):
         """Enter OpenClaw conversation mode."""
         if self.active:
             logger.warning(f"[{self.LOG_MODULE}] Already active, ignoring start()")

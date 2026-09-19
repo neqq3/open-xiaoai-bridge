@@ -50,10 +50,16 @@ class WakeupSessionManager:
         await open_xiaoai_server.stop_playing()
         await open_xiaoai_server.start_recording()
 
+    async def _restore_recording(self):
+        # PyO3 返回 awaitable Future，run_coroutine_threadsafe 需要 Python 协程包装。
+        import open_xiaoai_server
+        await open_xiaoai_server.start_recording()
+
     def on_interrupt(self):
         from core.services.native_visual import native_visual
 
-        visual_active = native_visual.session is not None
+        # 音乐任务可能已因设备侧先检测到唤醒而退出，不能只看当下 job 是否存在。
+        visual_active = native_visual.session is not None or native_visual.music.task is not None
         native_visual.preempt()
         logger.info("[Wakeup] XiaoAI wakeup — interrupting active sessions")
 
@@ -83,9 +89,7 @@ class WakeupSessionManager:
 
         if visual_active:
             # 原厂已经接管时只恢复 Bridge 录音，不再对原厂播放器发全局暂停。
-            import open_xiaoai_server
-
-            asyncio.run_coroutine_threadsafe(open_xiaoai_server.start_recording(), loop)
+            asyncio.run_coroutine_threadsafe(self._restore_recording(), loop)
         else:
             asyncio.run_coroutine_threadsafe(self._stop_device_playback(), loop)
 
@@ -139,6 +143,12 @@ class WakeupSessionManager:
         return False
 
     async def wakeup(self, text, source):
+        from core.services.native_visual import native_visual
+
+        async with native_visual.music.speech():
+            await self._wakeup(text, source)
+
+    async def _wakeup(self, text, source):
         before_wakeup = self.config.get_app_config("wakeup.before_wakeup")
         kws = get_kws()
         logger.debug(f"[Wakeup] Received wakeup request from {source}: {text}")

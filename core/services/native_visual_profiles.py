@@ -11,9 +11,10 @@ class NativeVisualProfile:
     phase_script: str
     microphone_relay: bool
     experimental: bool = False
+    music_script: str | None = None
 
 
-OH2P = NativeVisualProfile('oh2p_1.62.2', 'OH2P', '1.62.2', 'oh2p_visual_phase.sh', True)
+OH2P = NativeVisualProfile('oh2p_1.62.2', 'OH2P', '1.62.2', 'oh2p_visual_phase.sh', True, music_script='oh2p_music_visual.sh')
 LX06 = NativeVisualProfile('lx06_1.94.13_experimental', 'LX06', '1.94.13', 'lx06_visual_phase.sh', False, True)
 
 

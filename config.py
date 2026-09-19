@@ -176,6 +176,7 @@ APP_CONFIG = {
         "public_url": "",  # 必填（启用时）：http://Bridge局域网IP:9093，使用宿主机映射端口
         "bind_host": "0.0.0.0",  # Bridge 内监听地址；Docker bridge 网络中保留此值
         "port": 9093,  # Bridge 内监听端口，需与 Compose 容器端口一致
+        "music": {"enabled": False, "brightness": 50},  # 独立开关；OH2P 音乐频谱，亮度 1～100
         "listening_gain": 0.25,  # 0.05～1.0；只改变白灯幅度，可尝试 0.30，不改变 ASR/KWS 增益
     },
     "wakeup": {

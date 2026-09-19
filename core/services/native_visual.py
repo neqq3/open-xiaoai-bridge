@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from core.services.visual_audio import visual_audio
+from core.services.music_visual import MusicVisualService
 from core.services.native_visual_profiles import OH2P, select_profile
 from core.utils.logger import logger
 
@@ -52,6 +53,8 @@ class NativeVisualService:
         self.session = None
         self.lock = asyncio.Lock()
         self.quarantined = False
+        self.http_lock = asyncio.Lock()
+        self.music = MusicVisualService(self)
 
     async def open(self, speaker, settings):
         if not settings.get("enabled", False):
@@ -77,14 +80,35 @@ class NativeVisualService:
             check = await speaker.run_shell(prerequisites, timeout=3000)
             if not check or check.exit_code:
                 raise NativeVisualUnavailable("missing native visual prerequisites")
-            base = str(settings.get("public_url", "")).rstrip("/")
-            parsed = urlsplit(base)
-            if (parsed.scheme != "http" or not parsed.hostname or parsed.username
-                    or parsed.password or parsed.path or parsed.query or parsed.fragment):
-                raise NativeVisualUnavailable("set a reachable HTTP public_url without path")
+            base = await self.ensure_server(settings)
+            session = NativeVisualSession(self, speaker, base, settings.get("listening_gain", 0.25), profile)
+            self.session = session
+            if profile.experimental:
+                logger.warning("LX06 灯效为固件静态分析原型，尚未实机验证；不支持麦克风幅度回送", module="Native Visual")
+            return session
+
+    @staticmethod
+    def public_url(settings):
+        base = str(settings.get("public_url", "")).rstrip("/")
+        parsed = urlsplit(base)
+        if (parsed.scheme != "http" or not parsed.hostname or parsed.username
+                or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError("set a reachable HTTP public_url without path")
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("invalid public_url port")
+        return base
+
+    async def ensure_server(self, settings):
+        try:
+            base = self.public_url(settings)
+        except ValueError as exc:
+            raise NativeVisualUnavailable(str(exc)) from None
+        async with self.http_lock:
             if self.runner is None:
                 app = web.Application()
                 app.router.add_get("/native-visual/{token}", self.relay.handle_stream, allow_head=False)
+                app.router.add_put("/music-visual/audio/{token}", self.music.audio)
+                app.router.add_get("/music-visual/frames/{token}", self.music.frames, allow_head=False)
                 runner = web.AppRunner(app, access_log=None, shutdown_timeout=0.5)
                 await runner.setup()
                 try:
@@ -94,14 +118,11 @@ class NativeVisualService:
                     await runner.cleanup()
                     raise
                 self.runner = runner
-            session = NativeVisualSession(self, speaker, base, settings.get("listening_gain", 0.25), profile)
-            self.session = session
-            if profile.experimental:
-                logger.warning("LX06 灯效为固件静态分析原型，尚未实机验证；不支持麦克风幅度回送", module="Native Visual")
-            return session
+        return base
 
     def preempt(self):
         """原厂唤醒回调可跨线程撤销供数；不从回调线程发送设备命令。"""
+        self.music.preempt()
         session = self.session
         if session is not None:
             session.preempted.set()
@@ -111,6 +132,7 @@ class NativeVisualService:
                 self.relay.close(lease)
 
     async def shutdown(self):
+        await self.music.shutdown()
         if self.session:
             await self.session.close()
         self.relay.close_all()
@@ -182,7 +204,10 @@ class NativeVisualSession:
                 self.service.quarantined = True
                 task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
                 raise
-            if result is None or result.exit_code != 0:
+            # 正常阶段期限结束已经由设备脚本完成清理，可继续进入回答阶段。
+            expired = (result is not None and result.exit_code == 25
+                       and "visual_result=25 native_takeover=0" in result.stdout)
+            if result is None or (result.exit_code != 0 and not expired):
                 self.preempted.set()
                 details = re.search(r"visual_result=\d+ native_takeover=\d+", result.stdout) if result else None
                 reason = re.search(r"visual_abort=[a-z_]+", result.stdout) if result else None

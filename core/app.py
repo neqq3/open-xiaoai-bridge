@@ -201,6 +201,12 @@ class MainApp:
             QwenPawManager.initialize_from_config()
             asyncio.run_coroutine_threadsafe(QwenPawManager.connect(), self.loop)
 
+        # 音乐灯效运行在业务循环，关闭时不探测设备、不监听端口。
+        from core.services.native_visual import native_visual
+        asyncio.run_coroutine_threadsafe(
+            native_visual.music.start(self.config.get_app_config("native_visual", {})), self.loop
+        )
+
         # Start API Server if enabled
         if self._enable_api_server:
             host = os.environ.get("API_SERVER_HOST", "127.0.0.1")
