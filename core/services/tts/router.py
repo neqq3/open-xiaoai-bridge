@@ -1,6 +1,5 @@
 """Shared TTS provider routing and playback for all conversation backends."""
 
-import asyncio
 import os
 import tempfile
 
@@ -46,13 +45,17 @@ class TTSRouter:
         tts_speed: float = 1.0,
         playback_token: int | None = None,
         log_prefix: str = "TTS",
-    ) -> bool:
-        """返回底层播放结果；不代表已确认实体出声。失败只回退一次，取消不回退。"""
-        cls._check_playback_active(playback_token)
+    ) -> None:
+        """Synthesize and play text, falling back to XiaoAI native TTS."""
         provider = cls.resolve_provider(configured_provider, tts_speaker)
         try:
             if provider == "xiaoai":
-                return await cls._play_xiaoai(text, playback_token=playback_token)
+                from core.ref import get_speaker
+
+                speaker = get_speaker()
+                if speaker:
+                    await speaker.play(text=text, blocking=True)
+                return
 
             if provider == "doubao":
                 await cls._play_doubao(
@@ -61,51 +64,19 @@ class TTSRouter:
                     tts_speed=tts_speed,
                     playback_token=playback_token,
                 )
-                # Rust 豆包接口正常完成返回 None，不能对它直接取 bool。
-                cls._check_playback_active(playback_token)
-                return True
+                return
 
-            return await cls._play_openai_compatible(
+            await cls._play_openai_compatible(
                 text,
                 provider=provider,
                 tts_speaker=tts_speaker,
-                playback_token=playback_token,
             )
         except Exception as exc:
-            # 定向停止可能早于 HTTP 错误到达；旧 turn 不得通过回退复活。
-            cls._check_playback_active(playback_token)
             logger.error(
                 f"[{log_prefix}] Error playing response with TTS: "
                 f"{type(exc).__name__}: {exc}"
             )
-            if provider == "xiaoai":
-                return False
-            return await cls._fallback_to_xiaoai(
-                text,
-                log_prefix=log_prefix,
-                playback_token=playback_token,
-            )
-
-    @staticmethod
-    def _check_playback_active(playback_token: int | None) -> None:
-        """无 token 的旧调用保持原行为；失效 token 按取消处理。"""
-        if (
-            playback_token is not None
-            and not open_xiaoai_server.is_playback_session_active(playback_token)
-        ):
-            raise asyncio.CancelledError("TTS playback session is no longer active")
-
-    @classmethod
-    async def _play_xiaoai(cls, text: str, *, playback_token: int | None) -> bool:
-        from core.ref import get_speaker
-
-        cls._check_playback_active(playback_token)
-        speaker = get_speaker()
-        if not speaker:
-            return False
-        played = await speaker.play(text=text, blocking=True)
-        cls._check_playback_active(playback_token)
-        return bool(played)
+            await cls._fallback_to_xiaoai(text, log_prefix=log_prefix)
 
     @classmethod
     async def _play_doubao(
@@ -165,8 +136,7 @@ class TTSRouter:
         *,
         provider: str,
         tts_speaker: str | None,
-        playback_token: int | None = None,
-    ) -> bool:
+    ) -> None:
         if provider == "mlx_audio":
             tts_class = MLXAudioTTS
             config_key = "tts.mlx_audio"
@@ -200,7 +170,6 @@ class TTSRouter:
         temporary_path: str | None = None
         try:
             audio = await tts.synthesize(text)
-            cls._check_playback_active(playback_token)
             safe_format = "".join(
                 character
                 for character in tts.response_format.lower()
@@ -222,12 +191,9 @@ class TTSRouter:
             played = await speaker.play_server_file(
                 file_path=temporary_path,
                 blocking=True,
-                playback_token=playback_token,
             )
-            cls._check_playback_active(playback_token)
-            if not played:
+            if played is False:
                 raise RuntimeError("SpeakerManager.play_server_file returned false")
-            return True
         finally:
             if temporary_path:
                 try:
@@ -241,16 +207,12 @@ class TTSRouter:
                     )
 
     @classmethod
-    async def _fallback_to_xiaoai(
-        cls,
-        text: str,
-        *,
-        log_prefix: str,
-        playback_token: int | None = None,
-    ) -> bool:
+    async def _fallback_to_xiaoai(cls, text: str, *, log_prefix: str) -> None:
         try:
-            return await cls._play_xiaoai(text, playback_token=playback_token)
+            from core.ref import get_speaker
+
+            speaker = get_speaker()
+            if speaker:
+                await speaker.play(text=text, blocking=True)
         except Exception as exc:
-            cls._check_playback_active(playback_token)
             logger.error(f"[{log_prefix}] XiaoAI TTS fallback failed: {exc}")
-            return False

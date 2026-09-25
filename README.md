@@ -607,7 +607,9 @@ Hermes 复用上方 [TTS 配置](#-tts-配置) 的共享 Router。可选的 `her
 
 不填写 `tts_provider` 时保持旧行为：`tts_speaker="xiaoai"` 使用小爱原生 TTS，其他音色使用 Doubao。`session_tts_speakers` 可按 Session 覆盖音色；`tts_speed` 用于 Doubao，OpenAI / MLX-Audio 的语速使用相应 `tts.*.speed`。
 
-例如使用已配置好的 MLX-Audio，只需在 `hermes` 中增加 `"tts_provider": "mlx_audio"`；`tts_speaker="xiaoai"` 此时表示使用该 provider 的默认 voice/instruct。Hermes 的 streaming 仍是逐句生成正文并顺序播放：OpenAI / MLX-Audio 每句合成完整音频文件，不启用音频 SSE。播放返回值只反映底层软件接口结果，不是实体出声确认。
+例如使用已配置好的 MLX-Audio，只需在 `hermes` 中增加 `"tts_provider": "mlx_audio"`；`tts_speaker="xiaoai"` 此时表示使用该 provider 的默认 voice/instruct。Hermes 的 streaming 仍是逐句生成正文并顺序播放：OpenAI / MLX-Audio 每句合成完整音频文件，不启用音频 SSE。
+
+播放与回退沿用上游 Router：调用结束不代表确认出声，Router 内部处理的失败不会向 Hermes 返回状态，因此某句失败后队列仍可能继续。Hermes 不另加回退或重提 Agent 请求。中断时保留现有任务取消、清队列和停设备音频处理；OpenAI / MLX 文件播放的底层 token 不与 controller 共用，定向取消受上游接口限制，不能据此保证实体音频已停止。
 
 ### Session 与 Profile
 

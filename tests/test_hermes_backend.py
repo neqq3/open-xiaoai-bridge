@@ -377,23 +377,23 @@ class HermesBackendTest(unittest.TestCase):
         self.assertEqual("xiaoai", self.hermes._resolve_tts_provider("xiaoai"))
         self.assertEqual("doubao", self.hermes._resolve_tts_provider("voice"))
 
-    def test_hermes_delegates_voice_token_and_result_to_router(self):
+    def test_hermes_delegates_voice_token_and_void_contract_to_router(self):
         from core.services.tts.router import TTSRouter
 
-        self.hermes._tts_provider = "mlx_audio"
         self.hermes._tts_speaker = "default-voice"
         self.hermes._session_key = "speaker"
         self.hermes._session_tts_speakers = {"speaker": "session-voice"}
         self.hermes._tts_speed = 1.1
-        for result in (True, False):
+        for provider in ("xiaoai", "doubao", "openai", "mlx_audio"):
+            self.hermes._tts_provider = provider
             for override, voice in ((None, "session-voice"), ("explicit", "explicit")):
-                with mock.patch.object(TTSRouter, "play", new=mock.AsyncMock(return_value=result)) as play:
+                with mock.patch.object(TTSRouter, "play", new=mock.AsyncMock(return_value=None)) as play:
                     actual = asyncio.run(self.hermes._play_response_with_tts(
                         "回答", tts_speaker=override, playback_token=17,
                     ))
-                self.assertIs(actual, result)
+                self.assertIsNone(actual)
                 play.assert_awaited_once_with(
-                    "回答", configured_provider="mlx_audio", tts_speaker=voice,
+                    "回答", configured_provider=provider, tts_speaker=voice,
                     tts_speed=1.1, playback_token=17, log_prefix="Hermes",
                 )
 

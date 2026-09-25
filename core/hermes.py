@@ -516,11 +516,11 @@ class HermesManager(OpenAIManager):
         text: str,
         tts_speaker: str | None = None,
         playback_token: int | None = None,
-    ) -> bool:
-        """复用共享 Router，保留失败检查与当前 turn 的播放所有权。"""
+    ) -> None:
+        """等待共享 Router 处理 TTS；沿用上游不返回播放结果的契约。"""
         from core.services.tts.router import TTSRouter
 
-        return await TTSRouter.play(
+        await TTSRouter.play(
             text,
             configured_provider=cls._tts_provider,
             tts_speaker=tts_speaker or cls.get_tts_speaker_for_session_key(),

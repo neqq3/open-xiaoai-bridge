@@ -180,7 +180,8 @@ Hermes 是独立后端，拥有自己的 `HERMES_ENABLE`、`hermes` 配置、Ses
 - 最终文本开始到达后丢弃尚未播放的进度；已经开始播放的进度不被粗暴打断
 - 流式传输失败时不重新提交同一个 Agent turn；交付已收到的正文并提示用户重试
 - Bridge 仅按显式 `response_mode` 选择 streaming 或 complete，不根据模型名、地址或失败结果自动猜测和切换模式
-- TTS 复用共享 Router 的布尔软件结果，取消不触发回退；文件播放透传 controller 的 `playback_token`，不另建会话。成功不代表实体出声确认
+- TTS 沿用上游共享 Router 的 `None` 返回契约，按句等待调用结束；不将其判为失败或包装成成功回执。provider 回退只由 Router 负责，不在 Hermes 重播或重提 Agent 请求
+- Router 内部处理的播放失败不向 Hermes 返回状态；未处理的异常和任务取消继续传播。豆包透传 controller 的 `playback_token`，OpenAI / MLX 文件播放仍由上游底层另建 token，不能宣称同样具有按 controller token 定向取消的保证
 
 ### WakeupSessionManager (core/wakeup_session.py)
 

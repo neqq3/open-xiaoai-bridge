@@ -43,6 +43,8 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         class Backend(hermes):
             _tts_provider = "openai"
             _tts_speaker = "xiaoai"
+            _tts_speed = 1.0
+            _initialized = True
             _session_tts_speakers = {}
             _session_key = "test-speaker"
             _response_mode = "streaming"
@@ -61,7 +63,7 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.controller._vad_future = None
         self.controller._xiaoai_asr_future = None
         self.controller._loop = None
-        for name in ("_stop_recording", "_start_recording", "_play_send_sound"):
+        for name in ("_stop_recording", "_start_recording", "_play_send_sound", "_play_notify"):
             setattr(self.controller, name, AsyncMock())
 
         def begin():
@@ -72,18 +74,20 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
             if token == self.token:
                 self.token += 1
 
-        async def play_file(path, *, sample_rate, playback_token):
+        async def play_file(path, *, sample_rate):
             self.assertTrue(Path(path).is_file())
             self.assertEqual(24000, sample_rate)
-            self.assertEqual(self.token, playback_token)
+            # 上游文件接口独立创建 token，没有接收 controller token 的参数。
+            self.native.begin_playback_session()
             self.played_files.append(path)
             # 和 Rust 既有契约一致：正常返回 None。
 
         self.native = types.SimpleNamespace(
             begin_playback_session=Mock(side_effect=begin),
-            is_playback_session_active=lambda token: token == self.token,
             stop_tts_playback=Mock(side_effect=stop),
             play_audio_file=AsyncMock(side_effect=play_file),
+            tts_play=AsyncMock(return_value=None),
+            tts_stream_play=AsyncMock(return_value=None),
         )
         for module in (self.controller_module, self.router_module, self.speaker_module, self.external_module):
             self.enterContext(patch.object(module, "open_xiaoai_server", self.native))
@@ -92,9 +96,12 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.speaker.stop_device_audio = AsyncMock()
         self.enterContext(patch.object(importlib.import_module("core.ref"), "get_speaker", return_value=self.speaker))
         self.enterContext(patch.object(self.streaming_module, "get_speaker", return_value=self.speaker))
-        self.enterContext(patch.object(
+        self.tts_config = self.enterContext(patch.object(
             self.router_module.ConfigManager.instance(), "get_app_config",
-            return_value={"base_url": "http://tts.test/v1", "response_format": "wav"},
+            return_value={
+                "base_url": "http://tts.test/v1", "response_format": "wav",
+                "app_id": "test-app", "access_key": "test-key",
+            },
         ))
         self.synthesize = self.enterContext(patch.object(
             self.router_module.OpenAITTS, "synthesize", new=AsyncMock(return_value=b"audio"),
@@ -104,7 +111,7 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.backend.request_streaming_chat_completion = AsyncMock(side_effect=request)
         return await self.controller._request_backend_turn("问题", play_send_sound=False)
 
-    async def test_complete_uses_one_request_one_synthesis_and_same_token(self):
+    async def test_complete_uses_one_request_one_synthesis_and_upstream_file_api(self):
         self.backend._response_mode = "complete"
         self.backend._request_chat_completion = AsyncMock(return_value="完整回答")
         response, played = await self.controller._request_backend_turn("问题", play_send_sound=False)
@@ -112,10 +119,55 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         await self.controller._play_tts(response)
         self.backend._request_chat_completion.assert_awaited_once_with("问题")
         self.synthesize.assert_awaited_once_with("完整回答")
-        self.native.begin_playback_session.assert_called_once()
-        self.assertEqual(1, self.native.play_audio_file.await_args.kwargs["playback_token"])
+        self.assertEqual(2, self.native.begin_playback_session.call_count)
+        self.native.play_audio_file.assert_awaited_once_with(
+            self.played_files[0], sample_rate=24000,
+        )
+        self.assertIsNone(self.controller._playback_token)
         self.assertFalse(Path(self.played_files[0]).exists())
         self.speaker.play.assert_not_awaited()
+
+    async def test_all_providers_follow_router_none_contract(self):
+        for provider in ("xiaoai", "doubao", "openai", "mlx_audio"):
+            with self.subTest(provider=provider):
+                self.backend._tts_provider = provider
+                self.assertIsNone(await self.controller._play_tts("逐句回答"))
+                self.assertIsNone(self.controller._playback_token)
+        self.speaker.play.assert_awaited_once_with(text="逐句回答", blocking=True)
+        self.native.tts_play.assert_awaited_once()
+        self.assertIsNotNone(self.native.tts_play.await_args.kwargs["playback_token"])
+        self.assertEqual(2, self.native.play_audio_file.await_count)
+        self.assertTrue(all(not Path(path).exists() for path in self.played_files))
+
+    async def test_stream_waits_for_first_file_before_next_sentence(self):
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def play_file(path, *, sample_rate):
+            self.played_files.append(path)
+            self.assertTrue(Path(path).is_file())
+            if len(self.played_files) == 1:
+                first_started.set()
+                await release_first.wait()
+                self.assertTrue(Path(path).is_file())
+
+        async def request(_text, *, on_delta, on_tool_progress):
+            await on_delta("第一句话准备好了。第二句话也准备好了。")
+            return "第一句话准备好了。第二句话也准备好了。"
+
+        self.native.play_audio_file.side_effect = play_file
+        task = asyncio.create_task(self.turn(request))
+        await asyncio.wait_for(first_started.wait(), 1)
+        self.assertEqual(1, self.synthesize.await_count)
+        self.assertFalse(task.done())
+        release_first.set()
+        await asyncio.wait_for(task, 1)
+        self.assertEqual(
+            ["第一句话准备好了。", "第二句话也准备好了。"],
+            [call.args[0] for call in self.synthesize.await_args_list],
+        )
+        self.assertTrue(all(not Path(path).exists() for path in self.played_files))
+        self.backend.request_streaming_chat_completion.assert_awaited_once()
 
     async def test_stream_waits_for_native_fallback_before_next_sentence(self):
         entered_fallback = asyncio.Event()
@@ -174,7 +226,7 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(not Path(path).exists() for path in self.played_files))
 
-    async def test_complete_stop_during_synthesis_or_file_does_not_fallback(self):
+    async def test_complete_task_cancellation_during_synthesis_or_file_does_not_fallback(self):
         for phase in ("synthesis", "file"):
             with self.subTest(phase=phase):
                 self.controller.active = True
@@ -190,13 +242,12 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
                 target.side_effect = delayed
                 task = asyncio.create_task(self.controller._play_tts("旧回答"))
                 await asyncio.wait_for(started.wait(), 1)
-                old_token = self.controller._playback_token
                 self.controller.stop()
+                # 完整唤醒中断还会取消会话任务；单独停止旧 token 不是文件取消保证。
+                task.cancel()
                 replacement = self.native.begin_playback_session()
-                release.set()
                 with self.assertRaises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 1)
-                self.assertNotEqual(old_token, replacement)
                 self.assertEqual(replacement, self.token)
                 self.speaker.play.assert_not_awaited()
                 if phase == "file":
@@ -223,17 +274,49 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(self.played_files[0]).exists())
         self.speaker.play.assert_not_awaited()
         self.speaker.stop_device_audio.assert_awaited_once()
+        self.controller._start_recording.assert_awaited_once()
         self.backend.request_streaming_chat_completion.assert_awaited_once()
 
-    async def test_router_failure_reaches_controller_without_second_fallback(self):
-        self.synthesize.side_effect = RuntimeError("provider failed")
-        self.speaker.play.return_value = False
-        with self.assertRaisesRegex(RuntimeError, "did not complete"):
-            await self.controller._play_tts("无法播放")
-        self.synthesize.assert_awaited_once()
-        self.speaker.play.assert_awaited_once()
+    async def test_router_handled_failure_is_not_a_result_or_second_fallback(self):
+        for failure in (False, RuntimeError("fallback failed")):
+            with self.subTest(failure=failure):
+                self.synthesize.reset_mock()
+                self.speaker.play.reset_mock()
+                self.synthesize.side_effect = RuntimeError("provider failed")
+                self.speaker.play.side_effect = failure if isinstance(failure, Exception) else None
+                self.speaker.play.return_value = failure
+                self.assertIsNone(await self.controller._play_tts("无法播放"))
+                self.synthesize.assert_awaited_once()
+                self.speaker.play.assert_awaited_once()
+                self.assertIsNone(self.controller._playback_token)
 
-    async def test_speaker_legacy_file_call_omits_token_and_stale_call_never_starts(self):
+    async def test_stream_handled_failure_continues_without_resubmitting_agent(self):
+        async def request(_text, *, on_delta, on_tool_progress):
+            await on_delta("第一句话准备好了。第二句话也准备好了。")
+            return "第一句话准备好了。第二句话也准备好了。"
+
+        self.synthesize.side_effect = [RuntimeError("provider failed"), b"audio"]
+        self.speaker.play.return_value = False
+        response, dispatched = await self.turn(request)
+        self.assertTrue(dispatched)  # 表示不再完整重播，不是实体出声确认。
+        self.assertEqual("第一句话准备好了。第二句话也准备好了。", response)
+        self.assertEqual(2, self.synthesize.await_count)
+        self.speaker.play.assert_awaited_once()
+        self.native.play_audio_file.assert_awaited_once()
+        self.backend.request_streaming_chat_completion.assert_awaited_once()
+
+    async def test_complete_recovers_listening_after_router_none(self):
+        self.backend._response_mode = "complete"
+        self.backend._tts_provider = "xiaoai"
+        self.backend._request_chat_completion = AsyncMock(return_value="完整回答")
+        self.controller._wait_for_xiaoai_asr_text = AsyncMock(return_value="问题")
+        self.assertEqual("continue", await self.controller._run_one_turn_with_xiaoai_asr())
+        self.controller._stop_recording.assert_awaited_once()
+        self.controller._play_notify.assert_awaited_once()
+        self.controller._start_recording.assert_awaited_once()
+        self.speaker.play.assert_awaited_once_with(text="完整回答", blocking=True)
+
+    async def test_speaker_file_call_keeps_upstream_signature(self):
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "audio.wav"
             path.touch()
@@ -241,8 +324,6 @@ class HermesTTSRoutingTest(unittest.IsolatedAsyncioTestCase):
             self.native.play_audio_file.return_value = None
             self.assertTrue(await self.speaker.play_server_file(str(path)))
             self.native.play_audio_file.assert_awaited_once_with(str(path), sample_rate=24000)
-            with self.assertRaises(asyncio.CancelledError):
-                await self.speaker.play_server_file(str(path), playback_token=999)
             self.assertEqual(1, self.native.play_audio_file.await_count)
 
 
