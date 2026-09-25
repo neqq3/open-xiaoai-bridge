@@ -92,8 +92,9 @@ class SpeakerManager:
         file_path: str,
         blocking: bool = True,
         sample_rate: int = 24000,
+        playback_token: int | None = None,
     ) -> bool:
-        """播放服务端本地音频文件（解码为 PCM 后推流到音箱）"""
+        """播放本地文件；可复用调用方 token，取消不会重新分配播放会话。"""
         if not file_path:
             raise ValueError("file_path is required")
 
@@ -105,13 +106,32 @@ class SpeakerManager:
             f"sample_rate={sample_rate}"
         )
 
-        if blocking:
-            await open_xiaoai_server.play_audio_file(file_path, sample_rate=sample_rate)
-            return True
+        async def play_file() -> bool:
+            # 显式 token 始终属于调用方；旧调用不传 token 时由 Rust 分配。
+            kwargs = {"sample_rate": sample_rate}
+            if playback_token is not None:
+                if not open_xiaoai_server.is_playback_session_active(playback_token):
+                    raise asyncio.CancelledError(
+                        "File playback session is no longer active"
+                    )
+                kwargs["playback_token"] = playback_token
+            try:
+                await open_xiaoai_server.play_audio_file(file_path, **kwargs)
+                if (
+                    playback_token is not None
+                    and not open_xiaoai_server.is_playback_session_active(playback_token)
+                ):
+                    raise asyncio.CancelledError("File playback session was stopped")
+                return True
+            except asyncio.CancelledError:
+                if playback_token is not None:
+                    open_xiaoai_server.stop_tts_playback(playback_token)
+                raise
 
-        asyncio.create_task(
-            open_xiaoai_server.play_audio_file(file_path, sample_rate=sample_rate)
-        )
+        if blocking:
+            return await play_file()
+
+        asyncio.create_task(play_file())
         return True
 
     async def stop_device_audio(self) -> None:

@@ -41,8 +41,15 @@ fn cancel_playback_session_if_active(token: u64) -> bool {
         .is_ok()
 }
 
-fn is_playback_session_active(token: u64) -> bool {
+/// 查询现有播放所有权，不分配或取消会话。
+#[pyfunction]
+pub fn is_playback_session_active(token: u64) -> bool {
     PLAYBACK_TOKEN.load(Ordering::SeqCst) == token
+}
+
+fn resolve_file_playback_token(token: Option<u64>) -> Option<u64> {
+    let token = token.unwrap_or_else(begin_playback_session);
+    is_playback_session_active(token).then_some(token)
 }
 
 /// Throttle sending so the device never buffers more than MAX_AHEAD_MS of audio.
@@ -175,7 +182,14 @@ impl PcmPlaybackBuffer {
 }
 
 async fn play_pcm_with_buffer(pcm: Vec<u8>, sample_rate: u32, token: u64) {
+    // 迟到的合成/解码结果不得重启新会话正在使用的播放器。
+    if !is_playback_session_active(token) {
+        return;
+    }
     ensure_player_started().await;
+    if !is_playback_session_active(token) {
+        return;
+    }
     let started_at = Instant::now();
     let pcm_len = pcm.len();
     let mut playback_buffer = PcmPlaybackBuffer::new(sample_rate);
@@ -806,14 +820,17 @@ pub fn tts_play_background(
 }
 
 #[pyfunction]
-#[pyo3(signature = (file_path, sample_rate=24000))]
+#[pyo3(signature = (file_path, sample_rate=24000, playback_token=None))]
 pub fn play_audio_file(
     py: Python<'_>,
     file_path: String,
     sample_rate: u32,
+    playback_token: Option<u64>,
 ) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let playback_token = begin_playback_session();
+        let Some(playback_token) = resolve_file_playback_token(playback_token) else {
+            return Ok(());
+        };
         let started_at = Instant::now();
         let audio_data = std::fs::read(&file_path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -1032,6 +1049,7 @@ pub fn stop_tts_playback(token: Option<u64>) {
 
 pub fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(begin_playback_session, m)?)?;
+    m.add_function(wrap_pyfunction!(is_playback_session_active, m)?)?;
     m.add_function(wrap_pyfunction!(tts_stream_play, m)?)?;
     m.add_function(wrap_pyfunction!(tts_stream_play_background, m)?)?;
     m.add_function(wrap_pyfunction!(tts_play, m)?)?;
@@ -1041,4 +1059,31 @@ pub fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stop_tts_playback, m)?)?;
     m.add_function(wrap_pyfunction!(play_audio_file, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_playback_reuses_token_and_cannot_revive_or_cancel_replacement() {
+        let first = resolve_file_playback_token(None).unwrap();
+        assert_eq!(resolve_file_playback_token(Some(first)), Some(first));
+        assert!(is_playback_session_active(first));
+
+        assert!(cancel_playback_session_if_active(first));
+        assert_eq!(resolve_file_playback_token(Some(first)), None);
+        let replacement = resolve_file_playback_token(None).unwrap();
+        assert_eq!(resolve_file_playback_token(Some(first)), None);
+        assert!(!cancel_playback_session_if_active(first));
+        assert!(is_playback_session_active(replacement));
+        assert_eq!(
+            resolve_file_playback_token(Some(replacement)),
+            Some(replacement)
+        );
+
+        let legacy_next = resolve_file_playback_token(None).unwrap();
+        assert_eq!(legacy_next, replacement + 1);
+        assert!(!is_playback_session_active(replacement));
+    }
 }
