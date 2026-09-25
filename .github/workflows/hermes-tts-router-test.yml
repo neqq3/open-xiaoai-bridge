@@ -1,0 +1,58 @@
+name: Hermes TTS Router Validation Image
+
+on:
+  push:
+    branches: [dev/hermes-tts-router-test]
+  workflow_dispatch:
+
+concurrency:
+  group: hermes-tts-router-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  validate-and-build:
+    # 仅供自用 fork 验证，不向上游分支引入发布流程。
+    if: github.repository == 'neqq3/open-xiaoai-bridge' && github.ref == 'refs/heads/dev/hermes-tts-router-test'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      IMAGE: ghcr.io/neqq3/open-xiaoai-bridge:hermes-tts-router-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Test Python, test Rust, compile extension and build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.hermes-test
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Hermes TTS Router validation build
+          cache-from: type=gha,scope=hermes-tts-router-amd64
+          cache-to: type=gha,scope=hermes-tts-router-amd64,mode=max
+      - name: Verify native bindings in final runtime image without hardware
+        run: docker run --rm --network none --entrypoint /app/.venv/bin/python "$IMAGE" scripts/ci/check_native_tts.py
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish only the verified commit-specific tag
+        run: |
+          docker push "$IMAGE"
+          {
+            echo '## Verified Hermes TTS Router image'
+            echo "Image: \`$IMAGE\`"
+            echo "Revision: \`$GITHUB_SHA\`"
+            docker image inspect "$IMAGE" --format 'Image ID: {{.Id}}'
+            echo 'Python regression tests, full Rust tests/build, and final-image native binding checks passed.'
+          } >> "$GITHUB_STEP_SUMMARY"

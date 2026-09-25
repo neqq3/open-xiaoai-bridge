@@ -1,0 +1,23 @@
+# 独立测试上下文保留 Cargo.lock 和 Skill 文档，不改变上游 Dockerfile。
+.git
+.gitignore
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.mypy_cache
+.pytest_cache
+target
+.idea
+.vscode
+build
+dist
+*.so
+core/models/
+.env
+.env.*
+docs/
+.github/
+.DS_Store
+*.log

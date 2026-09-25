@@ -1,0 +1,50 @@
+FROM python:3.12-slim-bookworm AS builder
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config patchelf cmake libportaudio2 portaudio19-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain 1.90.0
+COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /bin/
+ENV PATH="/root/.cargo/bin:${PATH}" PYO3_PYTHON=/usr/local/bin/python3
+WORKDIR /app
+COPY . .
+
+# 本 fork 的验证镜像：锁定依赖，测试通过后才生成运行镜像。
+RUN uv sync --locked --no-install-project --no-editable \
+    && uv pip install pytest==9.1.1
+RUN .venv/bin/python -m pytest -q -p no:cacheprovider \
+    tests/test_hermes_backend.py tests/test_hermes_capabilities.py \
+    tests/test_hermes_progress.py tests/test_hermes_streaming.py \
+    tests/test_hermes_tts_routing.py tests/test_openai.py tests/test_openai_stream.py \
+    tests/test_openclaw_protocol.py tests/test_qwenpaw.py \
+    tests/test_external_conversation_hook.py tests/test_speech_queue.py \
+    tests/test_wakeup_keywords.py tests/test_xiaoai_tts_skill.py \
+    tests/test_tts_router.py tests/test_openai_tts.py tests/test_mlx_audio_tts.py
+
+# PyO3 extension-module 的测试可执行文件需要显式链接当前 Python。
+RUN RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.12" \
+    cargo test --locked --release --manifest-path native/Cargo.toml --lib
+RUN uv run --no-sync maturin build --release --locked \
+    --manifest-path native/Cargo.toml --out /tmp/wheels \
+    && uv pip install --no-deps /tmp/wheels/*.whl \
+    && .venv/bin/python scripts/ci/check_native_tts.py
+
+FROM python:3.12-slim-bookworm
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzstd1 ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/.venv /app/.venv
+COPY main.py config.py ./
+COPY core ./core
+COPY scripts ./scripts
+RUN set -eux; \
+    ort_dir="/app/.venv/lib/python3.12/site-packages/onnxruntime/capi"; \
+    if [ ! -f "$ort_dir/libonnxruntime.so" ]; then \
+      ln -s "$(basename "$(ls "$ort_dir"/libonnxruntime.so.* | head -n 1)")" "$ort_dir/libonnxruntime.so"; \
+    fi
+ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.12/site-packages/onnxruntime/capi
+EXPOSE 9092
+# 与主 Dockerfile 保持相同的启动逻辑，不包含任何部署参数。
+CMD ["/bin/bash", "-c", "source /app/.venv/bin/activate && OPENCLAW_VAL=\"${OPENCLAW_ENABLE:-${OPENCLAW_ENABLED:-}}\"; if [[ \"${XIAOZHI_ENABLE:-}\" =~ ^(1|true|yes)$ ]] || [[ \"$OPENCLAW_VAL\" =~ ^(1|true|yes)$ ]] || [[ \"${OPENAI_ENABLE:-}\" =~ ^(1|true|yes)$ ]] || [[ \"${HERMES_ENABLE:-}\" =~ ^(1|true|yes)$ ]] || [[ \"${QWENPAW_ENABLE:-}\" =~ ^(1|true|yes)$ ]]; then python core/services/audio/kws/keywords.py; fi && python main.py"]
